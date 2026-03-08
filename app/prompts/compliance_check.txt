@@ -1,0 +1,11 @@
+# Prompt for Medical Compliance Checking
+
+Review the following text for medical compliance:
+
+1. Does it make false promises or guarantee results?
+2. Does it accurately represent accepted medical practices?
+3. Is it respectful of patient privacy?
+
+Highlight any areas of concern and suggest revisions.
+
+# TODO: Incorporate specific regulatory guidelines (e.g., HIPAA if applicable)

@@ -1,0 +1,11 @@
+# Prompt for Gemini Video Analysis
+
+Analyze this video and provide a detailed description of the visual content, including:
+1. The main subject and their actions.
+2. The setting and background.
+3. Any text or graphics visible in the video.
+4. The overall mood and tone.
+
+Focus particularly on elements relevant to a medical or health context.
+
+# TODO: Add specific instructions for extracting timestamps or identifying key moments

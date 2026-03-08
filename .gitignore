@@ -1,0 +1,23 @@
+.env
+service-account.json
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# AI Assistants
+.agents/
+.agent/
+.claude/
+.cursor/
+.windsurf/
+.codebuddy/
+.codex/
+.continue/
+.gemini/
+.kiro/
+.opencode/
+.qoder/
+.roo/
+.trae/

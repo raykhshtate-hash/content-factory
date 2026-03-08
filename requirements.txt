@@ -1,0 +1,19 @@
+# Core
+fastapi
+uvicorn
+
+# Bot
+aiogram>=3.0.0
+
+# Database
+supabase
+
+# AI / ML
+anthropic
+openai
+google-cloud-storage
+google-api-python-client
+google-genai
+
+# Additional
+python-dotenv
