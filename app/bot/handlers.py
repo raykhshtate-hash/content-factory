@@ -69,7 +69,7 @@ async def cmd_format(message: types.Message):
 from app.services.drive_service import DriveService
 from app.services.gcs_service import GCSService
 from app.services.gemini_service import GeminiService, VideoAnalysis
-from app.services.creatomate_service import CreatomateService, Clip, Subtitle
+from app.services.creatomate_service import CreatomateService, Clip
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -171,7 +171,9 @@ async def cmd_ready(message: types.Message):
         await supabase_service.update_item(item_id, status="analyzing")
     
     # 3. Fire background task for Gemini
-    asyncio.create_task(analyze_and_propose(message.chat.id, item_id, gcs_uris, status_msg))
+    # We're already inside a BackgroundTask from the webhook handler,
+    # so a plain await keeps the CPU alive in Cloud Run.
+    await analyze_and_propose(message.chat.id, item_id, gcs_uris, status_msg)
 
 
 async def analyze_and_propose(chat_id: int, item_id: str, gcs_uris: list[str], status_msg: types.Message):
@@ -293,9 +295,11 @@ def _parse_mmss(mmss: str) -> float:
     return int(parts[0]) * 60 + float(parts[1])
 
 
-async def _candidates_to_clips(candidates, gcs_uris: list[str]) -> list[Clip]:
-    """Convert ClipCandidate list to Creatomate Clip list."""
+async def _candidates_to_clips(candidates, gcs_uris: list[str], gcs_service: GCSService) -> list[Clip]:
+    """Convert ClipCandidate list to Creatomate Clip list with signed URLs."""
     clips = []
+    _signed_cache: dict[str, str] = {}
+
     for c in candidates:
         if isinstance(c, dict):
             start = _parse_mmss(c["start_time"])
@@ -305,100 +309,57 @@ async def _candidates_to_clips(candidates, gcs_uris: list[str]) -> list[Clip]:
             start = _parse_mmss(c.start_time)
             end = _parse_mmss(c.end_time)
             v_idx = getattr(c, "video_index", 1) - 1
-            
+
         if v_idx < 0 or v_idx >= len(gcs_uris):
             v_idx = 0
-        
-        # Convert gs://bucket/path → public URL
-        # Signed URLs have complex query params that Creatomate can't handle
+
         gcs_uri = gcs_uris[v_idx]
-        public_url = gcs_uri.replace("gs://", "https://storage.googleapis.com/", 1)
-        clips.append(Clip(source=public_url, trim_start=start, trim_duration=end - start))
+        if gcs_uri not in _signed_cache:
+            _signed_cache[gcs_uri] = await asyncio.to_thread(
+                gcs_service.generate_presigned_url, gcs_uri
+            )
+        signed_url = _signed_cache[gcs_uri]
+        clips.append(Clip(source=signed_url, trim_start=start, trim_duration=end - start))
     return clips
 
 
-async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[Clip]):
-    """Common render logic for all modes."""
+async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[Clip], quality: str = "prod"):
+    """Common render logic for all modes. Karaoke subtitles are handled
+    natively by Creatomate's transcript_effect — no Whisper needed."""
     item_id = item["id"]
     webhook_url = f"{settings.BASE_URL}/webhooks/creatomate/{item_id}"
 
-    # Feature 2: Vertical format
     video_format = item.get("format", "reels")
-    _fmt = video_format.lower()
-    _dims = (1080, 1920) if _fmt in ("reels", "shorts", "tiktok") else (1920, 1080) if _fmt == "youtube" else (1080, 1080)
-    logger.debug("[Render] format=%s → width=%d, height=%d", video_format, *_dims)
 
-    # Feature 3: Music mood from Gemini analysis
     music_mood = None
     raw_analysis = item.get("analysis_result") or item.get("analysis_json")
     if raw_analysis:
         analysis_data = json.loads(raw_analysis) if isinstance(raw_analysis, str) else raw_analysis
         music_mood = analysis_data.get("suggested_music_mood")
 
-    # Feature 4: Whisper subtitles
-    subtitles = []
-    try:
-        timeline_offset = 0.0
-        for clip in clips:
-            words = await whisper.transcribe_url_with_timestamps(
-                video_url=clip.source,
-                trim_start=clip.trim_start,
-                trim_duration=clip.trim_duration,
-            )
-            # Group words into phrases of ~4 words
-            # BUG FIX: whisper returns "word" key, not "text"
-            phrase_words = []
-            phrase_start = None
-            for w in words:
-                if phrase_start is None:
-                    phrase_start = w["start"]
-                phrase_words.append(w["word"])  # ← fixed: was w["text"]
-                if len(phrase_words) >= 4:
-                    subtitles.append(Subtitle(
-                        text=" ".join(phrase_words),
-                        time=round(timeline_offset + phrase_start, 4),
-                        duration=round(w["end"] - phrase_start, 4),
-                    ))
-                    phrase_words = []
-                    phrase_start = None
-            # Flush remaining words
-            if phrase_words and phrase_start is not None:
-                subtitles.append(Subtitle(
-                    text=" ".join(phrase_words),
-                    time=round(timeline_offset + phrase_start, 4),
-                    duration=round(words[-1]["end"] - phrase_start, 4),
-                ))
-            # BUG FIX: round to 4dp to prevent floating-point drift across clips
-            timeline_offset = round(timeline_offset + clip.trim_duration, 4)
-        logger.debug("[Render] Generated %d subtitle phrases from Whisper", len(subtitles))
-    except Exception as e:
-        logger.error("Whisper subtitles failed (non-fatal): %s", e, exc_info=True)
-        subtitles = []
-
     creatomate = CreatomateService()
-    logger.debug("[Render] video_format=%r, music_mood=%r, subtitles_count=%d", video_format, music_mood, len(subtitles))
+    quality_label = "🧪 Dev (720p)" if quality == "dev" else "🚀 Prod (1080p)"
+    logger.debug("[Render] video_format=%r, music_mood=%r, clips=%d, quality=%s", video_format, music_mood, len(clips), quality)
     try:
         render_id = await creatomate.create_render(
             clips=clips,
             video_format=video_format,
             music_mood=music_mood,
-            subtitles=subtitles,
-            texts=[],
+            karaoke=True,
+            quality=quality,
             webhook_url=webhook_url,
         )
-        
-        # 7. Update status in Database
+
         await supabase_service.update_item(
             item_id,
             status="rendering",
             creatomate_render_id=render_id,
             selected_clips=[c.__dict__ for c in clips],
         )
-        await callback.message.edit_text("🎬 Монтирую... Пришлю результат когда будет готово.")
-        
+        await callback.message.edit_text(f"🎬 Монтирую ({quality_label})... Пришлю результат когда будет готово.")
+
     except RuntimeError as e:
         logger.error(f"Render initialization completely failed: {e}")
-        # Revert item status so the user can just push /ready again
         await supabase_service.update_item(item_id, status="awaiting_footage")
         try:
             await callback.message.answer("❌ Произошла ошибка при запуске сборки видео (сервер не отвечает). Попробуй нажать /ready ещё раз.")
@@ -410,21 +371,39 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
 async def on_render_callback(callback: types.CallbackQuery, state: FSMContext):
     try:
         print(f"🎯 [Callback] Received render action: {callback.data}")
-        _, mode, item_id = callback.data.split(":", 2)
+        parts = callback.data.split(":")
+        mode = parts[1]
+        item_id = parts[2]
+        # quality is optional 4th part, default "prod"
+        quality = parts[3] if len(parts) > 3 else None
 
         item = await supabase_service.get_item(item_id)
         if not item:
             await callback.answer("Запись не найдена", show_alert=True)
             return
-            
+
         gcs_uris = item.get("gcs_uris") or []
         if not gcs_uris:
             await callback.answer("Нет видео для монтажа.", show_alert=True)
             return
 
         gcs_service = GCSService()
-        gcs_url = await asyncio.to_thread(gcs_service.generate_presigned_url, gcs_uris[0])
 
+        # ── Step 1: If quality not yet chosen, show dev/prod buttons ──
+        if quality is None and mode in ("recommendation", "raw", "skip"):
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🧪 Dev (720p, быстро)", callback_data=f"render:{mode}:{item_id}:dev")],
+                [InlineKeyboardButton(text="🚀 Prod (1080p, финал)", callback_data=f"render:{mode}:{item_id}:prod")],
+            ])
+            await callback.message.edit_text("Выбери качество рендера:", reply_markup=keyboard)
+            await callback.answer()
+            return
+
+        # Default quality for custom flow (user already waited for clip selection)
+        if quality is None:
+            quality = "prod"
+
+        # ── Step 2: Build clips and render ────────────────────────
         if mode == "recommendation":
             raw = item.get("analysis_result") or item.get("analysis_json")
             if not raw:
@@ -433,8 +412,8 @@ async def on_render_callback(callback: types.CallbackQuery, state: FSMContext):
 
             analysis = json.loads(raw) if isinstance(raw, str) else raw
             candidates = analysis.get("clip_candidates", [])
-            clips = await _candidates_to_clips(candidates, gcs_uris)
-            await _start_render(callback, item, clips)
+            clips = await _candidates_to_clips(candidates, gcs_uris, gcs_service)
+            await _start_render(callback, item, clips, quality=quality)
 
         elif mode == "custom":
             raw = item.get("analysis_result") or item.get("analysis_json")
@@ -460,20 +439,17 @@ async def on_render_callback(callback: types.CallbackQuery, state: FSMContext):
             await state.update_data(item_id=item_id, candidates=candidates, gcs_uris=gcs_uris)
 
         elif mode in ("raw", "skip"):
-            # Ensure we have at least one URL
-            # Convert gs://bucket/path → public URL to match _candidates_to_clips logic
-            gcs_uri = gcs_uris[0]
-            public_url = gcs_uri.replace("gs://", "https://storage.googleapis.com/", 1)
-            
-            # Even split — 4 clips of 3 seconds each from the beginning
+            signed_url = await asyncio.to_thread(
+                gcs_service.generate_presigned_url, gcs_uris[0]
+            )
             clips = [
-                Clip(source=public_url, trim_start=i * 3.0, trim_duration=3.0)
+                Clip(source=signed_url, trim_start=i * 3.0, trim_duration=3.0)
                 for i in range(4)
             ]
-            await _start_render(callback, item, clips)
+            await _start_render(callback, item, clips, quality=quality)
 
         await callback.answer()
-        
+
     except Exception as e:
         import traceback
         print(f"❌ [Callback Error] {e}")
@@ -502,21 +478,14 @@ async def on_custom_clip_numbers(message: types.Message, state: FSMContext):
     await state.clear()
 
     item = await supabase_service.get_item(item_id)
-    clips = await _candidates_to_clips(selected, gcs_uris)
+    gcs_service = GCSService()
+    clips = await _candidates_to_clips(selected, gcs_uris, gcs_service)
 
-    # Reuse the common render path logic
-    class FakeCallback:
-        message = message
-    
-    await _start_render(FakeCallback(), item, clips)
-    await supabase_service.update_item(
-        item_id,
-        status="rendering",
-        creatomate_render_id=render_id,
-        selected_clips=[c.__dict__ for c in clips],
-    )
-
-    await message.answer("🎬 Монтирую... Пришлю результат когда будет готово.")
+    class _Ctx:
+        pass
+    ctx = _Ctx()
+    ctx.message = message
+    await _start_render(ctx, item, clips, quality="prod")
 
 
 # ---------------------------------------------------------------------------

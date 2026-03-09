@@ -2,14 +2,18 @@
 Creatomate Render Service — Dynamic JSON Source.
 
 Builds video renders entirely via JSON source (no predefined templates).
-Supports dynamic dimensions, background music, and word-level subtitles.
+Supports dynamic dimensions and native karaoke subtitles via
+Creatomate's transcript_effect (no external Whisper needed).
+
+Quality modes:
+  - "dev"  → 720×1280 @24fps  (saves Creatomate credits during testing)
+  - "prod" → 1080×1920 @60fps (full quality for publication)
 """
 
 import json
 import logging
 from dataclasses import dataclass
 import httpx
-from pydantic import BaseModel
 from tenacity import retry, retry_if_exception_type, wait_exponential, stop_after_attempt
 
 from app.config import settings
@@ -18,30 +22,89 @@ logger = logging.getLogger(__name__)
 
 API_URL = "https://api.creatomate.com/v1/renders"
 
-# ── Music Library (GCS public URLs by mood) ──────────────────────
-# TODO: Upload real tracks to GCS and replace these placeholder URLs.
-GCS_BUCKET_BASE = f"https://storage.googleapis.com/{settings.GCS_BUCKET_NAME}"
-
-MUSIC_LIBRARY: dict[str, str] = {
-    "upbeat":   f"{GCS_BUCKET_BASE}/music/upbeat.mp3",
-    "chill":    f"{GCS_BUCKET_BASE}/music/chill.mp3",
-    "dramatic": f"{GCS_BUCKET_BASE}/music/dramatic.mp3",
-    "funny":    f"{GCS_BUCKET_BASE}/music/funny.mp3",
-}
-
 
 @dataclass
 class Clip:
-    source: str       # public video URL
+    source: str       # signed video URL
     trim_start: float # seconds
     trim_duration: float
 
 
-@dataclass
-class Subtitle:
-    text: str
-    time: float       # seconds from the start of the composition
-    duration: float   # seconds
+# ── Quality presets ─────────────────────────────────────────────
+QUALITY_PRESETS = {
+    "dev": {
+        "vertical":   (720, 1280),
+        "horizontal": (1280, 720),
+        "square":     (720, 720),
+        "fps": 24,
+    },
+    "prod": {
+        "vertical":   (1080, 1920),
+        "horizontal": (1920, 1080),
+        "square":     (1080, 1080),
+        "fps": 60,
+    },
+}
+
+# ── Karaoke subtitle styles by mood ─────────────────────────────
+KARAOKE_STYLES: dict[str, dict] = {
+    "energetic": {
+        "fill_color": "#FFFFFF",
+        "transcript_color": "#FF3232",
+        "font_weight": "800",
+        "stroke_color": "#000000",
+        "stroke_width": "2 vmin",
+    },
+    "calm": {
+        "fill_color": "rgba(255,255,255,0.7)",
+        "transcript_color": "#FFFFFF",
+        "font_weight": "400",
+        "shadow_color": "rgba(0,0,0,0.4)",
+        "shadow_blur": "3 vmin",
+    },
+    "humor": {
+        "fill_color": "#FFFFFF",
+        "transcript_color": "#FFE600",
+        "font_weight": "800",
+        "stroke_color": "#000000",
+        "stroke_width": "2.5 vmin",
+    },
+    "professional": {
+        "fill_color": "rgba(255,255,255,0.8)",
+        "transcript_color": "#FFFFFF",
+        "font_weight": "600",
+        "shadow_color": "rgba(0,0,0,0.5)",
+        "shadow_blur": "2 vmin",
+    },
+    "upbeat": {
+        "fill_color": "#FFFFFF",
+        "transcript_color": "#FF6B9D",
+        "font_weight": "700",
+        "stroke_color": "#000000",
+        "stroke_width": "2 vmin",
+    },
+    "dramatic": {
+        "fill_color": "#FFFFFF",
+        "transcript_color": "#FF4444",
+        "font_weight": "700",
+        "stroke_color": "#000000",
+        "stroke_width": "2 vmin",
+    },
+    "funny": {
+        "fill_color": "#FFFFFF",
+        "transcript_color": "#FFE600",
+        "font_weight": "800",
+        "stroke_color": "#000000",
+        "stroke_width": "2.5 vmin",
+    },
+    "chill": {
+        "fill_color": "rgba(255,255,255,0.7)",
+        "transcript_color": "#FFFFFF",
+        "font_weight": "400",
+        "shadow_color": "rgba(0,0,0,0.3)",
+        "shadow_blur": "3 vmin",
+    },
+}
 
 
 class CreatomateService:
@@ -55,33 +118,33 @@ class CreatomateService:
         clips: list[Clip],
         video_format: str = "reels",
         music_mood: str | None = None,
-        subtitles: list[Subtitle] | None = None,
-        texts: list[str] | None = None,
+        karaoke: bool = True,
+        quality: str = "prod",
         webhook_url: str | None = None,
     ) -> str:
         """
         Creates a dynamic JSON-based render request.
-        Clips are laid out sequentially on an explicit timeline.
+
+        quality: "dev" (720p 24fps) or "prod" (1080p 60fps).
+        When karaoke=True, Creatomate auto-transcribes the audio and
+        highlights words in sync — no external Whisper/subtitles needed.
+
         Returns render_id (str) on success, raises on failure.
         """
-        if texts is None:
-            texts = []
-        if subtitles is None:
-            subtitles = []
+        preset = QUALITY_PRESETS.get(quality, QUALITY_PRESETS["prod"])
 
-        # ── Dimensions based on format ──────────────────────────
-        # Substring matching to catch "Instagram Reels", "YT Shorts", "Vertical", etc.
+        # ── Dimensions based on format + quality ────────────────
         fmt = video_format.lower()
         if any(kw in fmt for kw in ("reel", "short", "tiktok", "vertical", "9:16")):
-            width, height = 1080, 1920
+            width, height = preset["vertical"]
         elif any(kw in fmt for kw in ("youtube", "horizontal", "16:9")):
-            width, height = 1920, 1080
+            width, height = preset["horizontal"]
         else:
-            width, height = 1080, 1080
+            width, height = preset["square"]
 
-        # ── Rigid Vertical Composition Wrapper ───────────────────
-        # This forces Creatomate to strictly use width/height and crop
-        # internal elements with fit:cover, preventing auto-resizing.
+        fps = preset["fps"]
+
+        # ── Build clip timeline inside a rigid composition ──────
         composition_children = []
         current_time = 0.0
 
@@ -102,121 +165,43 @@ class CreatomateService:
 
         total_duration = current_time
 
-        # Wrap all videos in a locked container
         elements = [{
             "type": "composition",
+            "id": "main-comp",
             "track": 1,
-            "width": width,       # rigid canvas size
-            "height": height,     # rigid canvas size
+            "width": width,
+            "height": height,
             "fill_color": "#000000",
             "duration": total_duration,
-            "elements": composition_children
+            "elements": composition_children,
         }]
 
-        # ── Subtitle style by mood ──────────────────────────────
-        mood_styles = {
-            "energetic": {
-                "fill_color": "#FFFFFF",
-                "font_weight": "800",
-                "stroke_color": "#000000",
-                "stroke_width": "2 vmin",
-                "background_color": "rgba(255,50,50,0.35)",
-                "background_x_padding": "5%",
-                "background_y_padding": "3%",
-                "background_border_radius": "3%",
-            },
-            "calm": {
-                "fill_color": "#FFFFFFCC",
-                "font_weight": "300",
-                "shadow_color": "rgba(0,0,0,0.3)",
-                "shadow_blur": "3 vmin",
-            },
-            "humor": {
-                "fill_color": "#FFE600",
-                "font_weight": "800",
-                "stroke_color": "#000000",
-                "stroke_width": "2.5 vmin",
-                "background_color": "rgba(0,0,0,0.4)",
-                "background_x_padding": "5%",
-                "background_y_padding": "3%",
-                "background_border_radius": "4%",
-            },
-            "professional": {
-                "fill_color": "#FFFFFF",
-                "font_weight": "400",
-                "shadow_color": "rgba(0,0,0,0.25)",
-                "shadow_blur": "2 vmin",
-            },
-            "upbeat": {
-                "fill_color": "#FFFFFF",
-                "font_weight": "700",
-                "stroke_color": "#FF6B9D",
-                "stroke_width": "2 vmin",
-                "background_color": "rgba(0,0,0,0.3)",
-                "background_x_padding": "5%",
-                "background_y_padding": "3%",
-                "background_border_radius": "3%",
-            },
-            "dramatic": {
-                "fill_color": "#FF4444",
-                "font_weight": "700",
-                "stroke_color": "#000000",
-                "stroke_width": "2 vmin",
-                "shadow_color": "rgba(0,0,0,0.6)",
-                "shadow_blur": "5 vmin",
-            },
-            "funny": {
-                "fill_color": "#FFE600",
-                "font_weight": "800",
-                "stroke_color": "#000000",
-                "stroke_width": "2.5 vmin",
-                "background_color": "rgba(0,0,0,0.4)",
-                "background_x_padding": "5%",
-                "background_y_padding": "3%",
-                "background_border_radius": "4%",
-            },
-        }
-        style = mood_styles.get((music_mood or "professional").lower(), mood_styles["professional"])
+        # ── Karaoke subtitles (Creatomate native) ──────────────
+        if karaoke:
+            mood_key = (music_mood or "professional").lower()
+            style = KARAOKE_STYLES.get(mood_key, KARAOKE_STYLES["professional"])
 
-        # ── Subtitles as keyframe-based single text element ─────
-        # Best practice: one text element with keyframes array,
-        # NOT individual text elements per phrase.
-        if subtitles:
-            # Build keyframes: [{time, value}, ...]
-            keyframes = [{"time": 0, "value": ""}]
-            for sub in subtitles:
-                keyframes.append({"time": sub.time, "value": sub.text})
-                # Clear text after phrase ends
-                keyframes.append({"time": round(sub.time + sub.duration, 4), "value": ""})
-
-            caption_el = {
+            karaoke_el = {
                 "type": "text",
                 "track": 2,
+                "transcript_source": "main-comp",
+                "transcript_effect": "highlight",
+                "transcript_maximum_length": 15,
                 "time": 0,
                 "duration": total_duration,
-                "width": "100%",
-                "height": "100%",
-                "x_padding": "3 vmin",
-                "y_padding": "8 vmin",
+                "width": "90%",
+                "height": "20%",
+                "x": "50%",
+                "y": "78%",
                 "x_alignment": "50%",
-                "y_alignment": "100%",  # Bottom-aligned
+                "y_alignment": "50%",
                 "font_family": "Montserrat",
                 "font_size": "6.5 vmin",
-                "shadow_color": "rgba(0,0,0,0.65)",
-                "shadow_blur": "1.6 vmin",
-                "text": keyframes,
             }
-            caption_el.update(style)
-            elements.append(caption_el)
+            karaoke_el.update(style)
+            elements.append(karaoke_el)
 
-        # ── Background music ──────────────────────────────────────────
-        # Intentionally omitted. Users should add trending audio directly 
-        # in Instagram/TikTok during upload based on the suggested mood.
-
-        # ── Final source JSON ───────────────────────────────────
-        # 60fps for social media (TikTok/Reels), 30fps for YouTube
-        fps = 60 if fmt in ("reels", "shorts", "tiktok") else 30
-
+        # ── Final source JSON ─────────────────────────────────
         source = {
             "output_format": "mp4",
             "width": width,
@@ -226,16 +211,17 @@ class CreatomateService:
             "elements": elements,
         }
 
-        logger.info("Creatomate dynamic render: format=%s, clips=%d, subs=%d, mood=%s",
-                     video_format, len(clips), len(subtitles), music_mood)
-        logger.info("Creatomate source payload: %s", json.dumps(source, indent=2))
+        logger.info(
+            "Creatomate render: format=%s, quality=%s (%dx%d@%dfps), clips=%d, karaoke=%s, mood=%s",
+            video_format, quality, width, height, fps, len(clips), karaoke, music_mood,
+        )
+        logger.debug("Creatomate source payload:\n%s", json.dumps(source, indent=2))
 
-        # ── Send exactly ONE POST request to Creatomate ─────────
+        # ── Send POST to Creatomate ───────────────────────────
         api_key = settings.CREATOMATE_API_KEY
         if not api_key:
             raise ValueError("No Creatomate API key configured.")
 
-        # Inner bounded function for retry logic specifically for the HTTP call
         @retry(
             retry=retry_if_exception_type((httpx.HTTPStatusError, httpx.RequestError)),
             wait=wait_exponential(multiplier=2, min=5, max=15),
@@ -245,14 +231,13 @@ class CreatomateService:
         async def _trigger_creatomate_api():
             async with httpx.AsyncClient(timeout=30) as client:
                 res = await client.post(
-                    "https://api.creatomate.com/v1/renders",
+                    API_URL,
                     headers={
                         "Authorization": f"Bearer {api_key}",
                         "Content-Type": "application/json",
                     },
                     json={"source": source, "webhook_url": webhook_url},
                 )
-                # Only retry on 5xx or timeout. 4xx (like 400 Bad Request) are usually fatal syntax errors
                 if res.status_code >= 500:
                     res.raise_for_status()
                 return res
@@ -267,5 +252,5 @@ class CreatomateService:
         render = data[0] if isinstance(data, list) else data
         render_id = render["id"]
 
-        logger.info("Creatomate render created: %s", render_id)
+        logger.info("Creatomate render created: %s (quality=%s)", render_id, quality)
         return render_id

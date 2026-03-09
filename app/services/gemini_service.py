@@ -11,8 +11,8 @@ from pydantic import BaseModel, Field
 
 from google import genai
 from google.genai import types
-from google.api_core.exceptions import ResourceExhausted, ServiceUnavailable, InternalServerError
-from tenacity import retry, retry_if_exception_type, wait_exponential, stop_after_attempt
+from google.genai.errors import ClientError, ServerError
+from tenacity import retry, retry_if_exception, wait_exponential, stop_after_attempt
 
 
 # ── Structured Output Schema ────────────────────────────────────
@@ -62,7 +62,10 @@ class GeminiService:
             self.client = None
 
     @retry(
-        retry=retry_if_exception_type((ResourceExhausted, ServiceUnavailable, InternalServerError)),
+        retry=retry_if_exception(
+            lambda e: isinstance(e, (ServerError,))
+            or (isinstance(e, ClientError) and getattr(e, "code", 0) == 429)
+        ),
         wait=wait_exponential(multiplier=3, min=10, max=60),
         stop=stop_after_attempt(3),
         reraise=True,
@@ -118,6 +121,8 @@ class GeminiService:
             print("⚠️ [Gemini] Fallback to manual JSON parsing.")
             return VideoAnalysis.model_validate_json(response.text)
 
+        except (ClientError, ServerError):
+            raise  # let @retry handle 429 / 5xx
         except Exception as e:
             print(f"❌ [Gemini] Error: {e}")
             return None
