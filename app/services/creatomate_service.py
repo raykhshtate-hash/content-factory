@@ -107,6 +107,22 @@ KARAOKE_STYLES: dict[str, dict] = {
 }
 
 
+# ── Pop-up overlay position mapping ─────────────────────────────
+OVERLAY_POSITIONS = {
+    "top-left":      {"x": "18%", "y": "15%"},
+    "top-right":     {"x": "82%", "y": "15%"},
+    "center":        {"x": "50%", "y": "45%"},
+    "bottom-left":   {"x": "18%", "y": "65%"},
+    "bottom-right":  {"x": "82%", "y": "65%"},
+}
+
+OVERLAY_SIZES = {
+    "small":  "18 vmin",
+    "medium": "24 vmin",
+    "large":  "30 vmin",
+}
+
+
 class CreatomateService:
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key or settings.CREATOMATE_API_KEY
@@ -120,6 +136,7 @@ class CreatomateService:
         music_mood: str | None = None,
         karaoke: bool = True,
         quality: str = "prod",
+        overlays: list[dict] | None = None,
         webhook_url: str | None = None,
     ) -> str:
         """
@@ -144,13 +161,28 @@ class CreatomateService:
 
         fps = preset["fps"]
 
-        # ── Build clip timeline inside a rigid composition ──────
-        composition_children = []
+        # ── Build flat timeline — one named video + one karaoke text per clip ──
+        elements = []
+        karaoke_elements = []
         current_time = 0.0
 
-        for clip in clips:
-            composition_children.append({
+        mood_key = (music_mood or "professional").lower() if karaoke else None
+        style = KARAOKE_STYLES.get(mood_key, KARAOKE_STYLES["professional"]) if karaoke else {}
+
+        for i, clip in enumerate(clips):
+            clip_name = f"clip-{i}"
+            # Ken Burns: even clips zoom in, odd clips zoom out
+            if i % 2 == 0:
+                start_scale, end_scale = "100%", "110%"
+            else:
+                start_scale, end_scale = "110%", "100%"
+
+            # Transition only on scene change (different source video)
+            is_scene_change = i > 0 and clip.source != clips[i - 1].source
+
+            video_el = {
                 "type": "video",
+                "name": clip_name,
                 "track": 1,
                 "source": clip.source,
                 "width": "100%",
@@ -160,46 +192,96 @@ class CreatomateService:
                 "trim_start": clip.trim_start,
                 "trim_duration": clip.trim_duration,
                 "duration": clip.trim_duration,
-            })
+                "animations": [
+                    {
+                        "time": "start",
+                        "duration": clip.trim_duration,
+                        "easing": "linear",
+                        "type": "scale",
+                        "scope": "element",
+                        "start_scale": start_scale,
+                        "end_scale": end_scale,
+                    }
+                ],
+            }
+
+            if is_scene_change:
+                video_el["transition"] = {
+                    "duration": 0.1,
+                    "type": "fade",
+                }
+
+            elements.append(video_el)
+
+            if karaoke:
+                karaoke_el = {
+                    "type": "text",
+                    "track": 2,
+                    "transcript_source": clip_name,
+                    "transcript_effect": "karaoke",
+                    "transcript_maximum_length": 15,
+                    "time": current_time,
+                    "duration": clip.trim_duration,
+                    "width": "90%",
+                    "height": "20%",
+                    "x": "50%",
+                    "y": "78%",
+                    "x_alignment": "50%",
+                    "y_alignment": "50%",
+                    "font_family": "Montserrat",
+                    "font_weight": "700",
+                    "font_size": "8 vmin",
+                    "stroke_color": "#000000",
+                    "stroke_width": "1.6 vmin",
+                }
+                karaoke_el.update(style)
+                karaoke_elements.append(karaoke_el)
+
             current_time += clip.trim_duration
 
         total_duration = current_time
+        elements.extend(karaoke_elements)
 
-        elements = [{
-            "type": "composition",
-            "id": "main-comp",
-            "track": 1,
-            "width": width,
-            "height": height,
-            "fill_color": "#000000",
-            "duration": total_duration,
-            "elements": composition_children,
-        }]
+        # ── Pop-up overlays (emoji/text) ───────────────────────
+        if overlays:
+            for ov in overlays:
+                pos = OVERLAY_POSITIONS.get(ov.get("position", "top-right"), OVERLAY_POSITIONS["top-right"])
+                font_size = OVERLAY_SIZES.get(ov.get("size", "medium"), OVERLAY_SIZES["medium"])
 
-        # ── Karaoke subtitles (Creatomate native) ──────────────
-        if karaoke:
-            mood_key = (music_mood or "professional").lower()
-            style = KARAOKE_STYLES.get(mood_key, KARAOKE_STYLES["professional"])
-
-            karaoke_el = {
-                "type": "text",
-                "track": 2,
-                "transcript_source": "main-comp",
-                "transcript_effect": "highlight",
-                "transcript_maximum_length": 15,
-                "time": 0,
-                "duration": total_duration,
-                "width": "90%",
-                "height": "20%",
-                "x": "50%",
-                "y": "78%",
-                "x_alignment": "50%",
-                "y_alignment": "50%",
-                "font_family": "Montserrat",
-                "font_size": "6.5 vmin",
-            }
-            karaoke_el.update(style)
-            elements.append(karaoke_el)
+                overlay_el = {
+                    "type": "text",
+                    "track": 3,
+                    "text": ov.get("content", "✨"),
+                    "time": ov["time"],
+                    "duration": ov["duration"],
+                    "width": "40%",
+                    "height": "12%",
+                    "x": pos["x"],
+                    "y": pos["y"],
+                    "x_alignment": "50%",
+                    "y_alignment": "50%",
+                    "font_size": font_size,
+                    "fill_color": "#FFFFFF",
+                    "stroke_color": "#000000",
+                    "stroke_width": "1.2 vmin",
+                    "shadow_color": "rgba(0,0,0,0.5)",
+                    "shadow_blur": "2 vmin",
+                    "animations": [
+                        {
+                            "time": "start",
+                            "duration": 0.2,
+                            "type": "fade",
+                            "fade": "in",
+                        },
+                        {
+                            "time": "end",
+                            "duration": 0.2,
+                            "type": "fade",
+                            "fade": "out",
+                        },
+                    ],
+                }
+                elements.append(overlay_el)
 
         # ── Final source JSON ─────────────────────────────────
         source = {
@@ -212,8 +294,8 @@ class CreatomateService:
         }
 
         logger.info(
-            "Creatomate render: format=%s, quality=%s (%dx%d@%dfps), clips=%d, karaoke=%s, mood=%s",
-            video_format, quality, width, height, fps, len(clips), karaoke, music_mood,
+            "Creatomate render: format=%s, quality=%s (%dx%d@%dfps), clips=%d, karaoke=%s, overlays=%d, mood=%s",
+            video_format, quality, width, height, fps, len(clips), karaoke, len(overlays or []), music_mood,
         )
         logger.debug("Creatomate source payload:\n%s", json.dumps(source, indent=2))
 

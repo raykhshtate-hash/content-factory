@@ -39,8 +39,9 @@ Pipeline: idea → script → video upload → AI analysis → render → delive
 
 ### Creatomate
 - We use **dynamic JSON source** (not templates). All render logic is in `creatomate_service.py`.
-- Composition has `"id": "main-comp"` — karaoke subtitles reference this via `transcript_source`.
-- `transcript_effect: "highlight"` = native Creatomate karaoke. NO Whisper needed for subtitles.
+- Flat timeline: each video clip is named `clip-{i}`, each gets its own karaoke text element with `transcript_source`.
+- `transcript_effect: "karaoke"` = native Creatomate word-by-word subs. NO Whisper needed for subtitles.
+- **Zoom/pan (Ken Burns)**: Each clip alternates zoom-in (100%→110%) and zoom-out (110%→100%) via `animations` array for dynamic feel.
 - **Dev/Prod quality**: `quality="dev"` = 720×1280 @24fps, `quality="prod"` = 1080×1920 @60fps.
 
 ### Gemini

@@ -331,11 +331,27 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
 
     video_format = item.get("format", "reels")
 
+    if not clips:
+        await callback.message.edit_text("❌ Нет клипов для монтажа. Попробуй загрузить видео заново и нажми /ready.")
+        return
+
     music_mood = None
     raw_analysis = item.get("analysis_result") or item.get("analysis_json")
     if raw_analysis:
         analysis_data = json.loads(raw_analysis) if isinstance(raw_analysis, str) else raw_analysis
         music_mood = analysis_data.get("suggested_music_mood")
+
+    # Pop-up overlays: Claude reads script and generates emoji/text popups
+    overlays = []
+    script_text = item.get("script", "")
+    if script_text:
+        total_dur = sum(c.trim_duration for c in clips)
+        try:
+            overlays = await claude.generate_overlays(script_text, total_dur)
+            logger.debug("[Render] Claude generated %d overlays", len(overlays))
+        except Exception as e:
+            logger.warning("Overlay generation failed (non-fatal): %s", e)
+            overlays = []
 
     creatomate = CreatomateService()
     quality_label = "🧪 Dev (720p)" if quality == "dev" else "🚀 Prod (1080p)"
@@ -347,6 +363,7 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
             music_mood=music_mood,
             karaoke=True,
             quality=quality,
+            overlays=overlays,
             webhook_url=webhook_url,
         )
 
@@ -395,7 +412,10 @@ async def on_render_callback(callback: types.CallbackQuery, state: FSMContext):
                 [InlineKeyboardButton(text="🧪 Dev (720p, быстро)", callback_data=f"render:{mode}:{item_id}:dev")],
                 [InlineKeyboardButton(text="🚀 Prod (1080p, финал)", callback_data=f"render:{mode}:{item_id}:prod")],
             ])
-            await callback.message.edit_text("Выбери качество рендера:", reply_markup=keyboard)
+            try:
+                await callback.message.edit_text("Выбери качество рендера:", reply_markup=keyboard)
+            except Exception:
+                pass  # message already updated (duplicate click)
             await callback.answer()
             return
 
@@ -413,6 +433,17 @@ async def on_render_callback(callback: types.CallbackQuery, state: FSMContext):
             analysis = json.loads(raw) if isinstance(raw, str) else raw
             candidates = analysis.get("clip_candidates", [])
             clips = await _candidates_to_clips(candidates, gcs_uris, gcs_service)
+
+            if not clips:
+                # No recommended clips — fall back to using full raw videos
+                logger.warning("[Render] No clip candidates, falling back to raw video clips")
+                clips = []
+                for uri in gcs_uris:
+                    signed_url = await asyncio.to_thread(
+                        gcs_service.generate_presigned_url, uri
+                    )
+                    clips.append(Clip(source=signed_url, trim_start=0.0, trim_duration=15.0))
+
             await _start_render(callback, item, clips, quality=quality)
 
         elif mode == "custom":

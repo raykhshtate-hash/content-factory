@@ -125,6 +125,54 @@ class ClaudeService:
             }
         return result
 
+    async def generate_overlays(self, script: str, total_duration: float) -> list[dict]:
+        """
+        Claude as director: reads the script and generates pop-up overlay
+        instructions (emoji, short text) with precise timing.
+        """
+        prompt = (
+            f"Ты — креативный режиссёр монтажа Instagram Reels.\n\n"
+            f"Вот сценарий видео (длительность {total_duration:.1f} сек):\n\n"
+            f"{script}\n\n"
+            f"ЗАДАЧА: Придумай 3-5 pop-up элементов (эмодзи или эмодзи + короткий текст до 3 слов), "
+            f"которые появляются поверх видео в ключевые моменты.\n\n"
+            f"ПРАВИЛА:\n"
+            f"- Каждый pop-up длится 2.5-3.5 секунды\n"
+            f"- НЕ перекрывай первую секунду (хук) и последнюю секунду\n"
+            f"- Минимум 2 секунды между pop-ups\n"
+            f"- Используй эмодзи как основу: 🤔 💡 ✨ 🧴 💆‍♀️ 🪞 ❤️ 👀 🔥 и т.д.\n"
+            f"- Можно добавить 1-3 слова к эмодзи (например: '✨ 3 средства', '🤔 А если...')\n"
+            f"- position: 'top-left', 'top-right', 'center', 'bottom-left', 'bottom-right'\n"
+            f"- НЕ ставь в 'bottom-center' — там субтитры\n"
+            f"- size: 'small', 'medium', 'large'\n"
+            f"- Привязывай pop-up к смыслу: если речь про косметику → 🧴, если вопрос → 🤔, если инсайт → 💡\n\n"
+            f"Ответь ТОЛЬКО валидным JSON массивом, без markdown:\n"
+            f'[{{"time": 3.0, "duration": 1.5, "content": "🧴", "position": "top-right", "size": "large"}}]'
+        )
+
+        raw = await self._chat(prompt, max_tokens=1024)
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
+        raw = re.sub(r"\s*```$", "", raw, flags=re.MULTILINE).strip()
+
+        try:
+            overlays = json.loads(raw)
+            valid = []
+            for o in overlays:
+                t = float(o.get("time", 0))
+                d = float(o.get("duration", 1.5))
+                if t < 0 or t + d > total_duration:
+                    continue
+                valid.append({
+                    "time": t,
+                    "duration": max(min(d, 3.5), 2.5),
+                    "content": str(o.get("content", "✨"))[:20],
+                    "position": o.get("position", "top-right"),
+                    "size": o.get("size", "medium"),
+                })
+            return valid[:5]
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return []
+
     async def suggest_formats(self, idea_text: str) -> list[str]:
         """
         Suggest the three best content formats for a given idea.
