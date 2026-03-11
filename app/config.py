@@ -14,6 +14,7 @@ class Settings:
     GCS_BUCKET_NAME: str = os.getenv("GCS_BUCKET", "")
     DRIVE_INBOX_FOLDER_ID: str = os.getenv("DRIVE_INBOX_FOLDER_ID", "")
     GOOGLE_APPLICATION_CREDENTIALS: str = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "")
+    PEXELS_API_KEY: str = os.getenv("PEXELS_API_KEY", "")
     BASE_URL: str = os.getenv("BASE_URL", "")  # public URL for webhooks (e.g. Cloud Run URL)
 
 settings = Settings()
