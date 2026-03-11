@@ -128,7 +128,8 @@ class ClaudeService:
     async def generate_overlays(self, script: str, total_duration: float) -> list[dict]:
         """
         Claude as director: reads the script and generates pop-up overlay
-        instructions (emoji, short text) with precise timing.
+        instructions (emoji + optional short text) with precise timing.
+        Each overlay gets a mood that determines its pill background color.
         """
         prompt = (
             f"Ты — креативный режиссёр монтажа Instagram Reels.\n\n"
@@ -138,37 +139,56 @@ class ClaudeService:
             f"которые появляются поверх видео в ключевые моменты.\n\n"
             f"ПРАВИЛА:\n"
             f"- Каждый pop-up длится 2.5-3.5 секунды\n"
-            f"- НЕ перекрывай первую секунду (хук) и последнюю секунду\n"
-            f"- Минимум 2 секунды между pop-ups\n"
+            f"- НЕ перекрывай первые 1.5 секунды (хук) и последнюю секунду\n"
+            f"- Минимум 3 секунды между pop-ups (они не должны перекрываться!)\n"
             f"- Используй эмодзи как основу: 🤔 💡 ✨ 🧴 💆‍♀️ 🪞 ❤️ 👀 🔥 и т.д.\n"
-            f"- Можно добавить 1-3 слова к эмодзи (например: '✨ 3 средства', '🤔 А если...')\n"
+            f"- Можно добавить максимум 2 коротких слова к эмодзи. Текст должен быть ОЧЕНЬ коротким: '✨ Секрет', '🧴 3 средства', '💡 Факт'\n"
             f"- position: 'top-left', 'top-right', 'center', 'bottom-left', 'bottom-right'\n"
-            f"- НЕ ставь в 'bottom-center' — там субтитры\n"
-            f"- size: 'small', 'medium', 'large'\n"
-            f"- Привязывай pop-up к смыслу: если речь про косметику → 🧴, если вопрос → 🤔, если инсайт → 💡\n\n"
+            f"- НЕ ставь в bottom-center — там субтитры\n"
+            f"- Чередуй позиции (не ставь все в одно место)\n"
+            f"- size: 'small' (акцент), 'medium' (основной), 'large' (wow-момент)\n"
+            f"- mood: 'question' (вопрос/сомнение), 'insight' (инсайт/совет), 'positive' (позитив/результат), 'warning' (важно/осторожно), 'default'\n"
+            f"- Привязывай mood к контексту: вопрос → question, совет → insight, результат → positive\n\n"
             f"Ответь ТОЛЬКО валидным JSON массивом, без markdown:\n"
-            f'[{{"time": 3.0, "duration": 1.5, "content": "🧴", "position": "top-right", "size": "large"}}]'
+            f'[{{"time": 3.0, "duration": 3.0, "content": "🧴 Совет", "position": "top-right", "size": "medium", "mood": "insight"}}]'
         )
 
         raw = await self._chat(prompt, max_tokens=1024)
         raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
         raw = re.sub(r"\s*```$", "", raw, flags=re.MULTILINE).strip()
 
+        VALID_MOODS = {"default", "question", "insight", "positive", "warning"}
+        VALID_POSITIONS = {"top-left", "top-right", "center", "bottom-left", "bottom-right"}
+        VALID_SIZES = {"small", "medium", "large"}
+
         try:
             overlays = json.loads(raw)
             valid = []
+            last_end = 0.0
             for o in overlays:
                 t = float(o.get("time", 0))
-                d = float(o.get("duration", 1.5))
-                if t < 0 or t + d > total_duration:
+                d = float(o.get("duration", 3.0))
+                d = max(min(d, 3.5), 2.5)  # clamp 2.5–3.5s
+
+                # Skip if out of bounds or overlapping with previous
+                if t < 1.5 or t + d > total_duration - 1.0:
                     continue
+                if t < last_end + 1.0:  # at least 1s gap between pop-ups
+                    continue
+
+                pos = o.get("position", "top-right")
+                size = o.get("size", "medium")
+                mood = o.get("mood", "default")
+
                 valid.append({
                     "time": t,
-                    "duration": max(min(d, 3.5), 2.5),
-                    "content": str(o.get("content", "✨"))[:20],
-                    "position": o.get("position", "top-right"),
-                    "size": o.get("size", "medium"),
+                    "duration": d,
+                    "content": str(o.get("content", "✨"))[:15],
+                    "position": pos if pos in VALID_POSITIONS else "top-right",
+                    "size": size if size in VALID_SIZES else "medium",
+                    "mood": mood if mood in VALID_MOODS else "default",
                 })
+                last_end = t + d
             return valid[:5]
         except (json.JSONDecodeError, KeyError, TypeError):
             return []
