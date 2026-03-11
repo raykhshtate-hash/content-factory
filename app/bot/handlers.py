@@ -71,6 +71,7 @@ from app.services.gcs_service import GCSService
 from app.services.gemini_service import GeminiService, VideoAnalysis
 from app.services.creatomate_service import CreatomateService, Clip
 from app.services import pexels_service
+from app.services.timeline_utils import map_broll_to_render_timeline
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -373,6 +374,10 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
                 )
                 broll_overlays = [r for r in results if isinstance(r, dict)]
                 logger.info("[Render] B-roll: %d/%d keywords found media", len(broll_overlays), len(broll_keywords))
+
+                # Remap source timecodes → render timeline
+                clips_as_dicts = [c.__dict__ for c in clips]
+                broll_overlays = map_broll_to_render_timeline(broll_overlays, clips_as_dicts)
             except Exception as e:
                 logger.warning("B-roll generation failed (non-fatal): %s", e)
 
