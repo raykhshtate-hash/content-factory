@@ -219,16 +219,23 @@ class ClaudeService:
             "Выбранные клипы (таймкоды и описание сцены от AI-анализа):\n"
             f"{clips_block}\n\n"
             "ЗАДАЧА: Для каждого клипа придумай B-roll overlay.\n\n"
-            "ПРАВИЛА:\n"
-            "- broll_keyword — короткий поисковый запрос на АНГЛИЙСКОМ для Pexels (2-3 слова, конкретный визуал).\n"
-            "  Хорошие примеры: 'woman applying moisturizer', 'dermatologist office', 'skin texture closeup'\n"
-            "  Плохие примеры: 'beauty', 'health', 'medicine' (слишком абстрактно)\n"
-            "- overlay_type:\n"
+            "ПРАВИЛА для broll_keyword:\n"
+            "- ОБЯЗАТЕЛЬНО 2-3 слова. Одно слово ЗАПРЕЩЕНО.\n"
+            "- Описывай КОНКРЕТНЫЙ предмет или действие, НЕ абстрактную сцену.\n"
+            "  ХОРОШО: 'hyaluronic acid syringe', 'face cream jar closeup', 'woman touching face skin'\n"
+            "  ПЛОХО: 'beauty', 'skincare', 'cream', 'woman shower' (слишком абстрактно или широко)\n"
+            "- К предметам ВСЕГДА добавляй 'closeup' или 'product':\n"
+            "  'cream' → 'face cream jar closeup'\n"
+            "  'injection' → 'cosmetic injection procedure closeup'\n"
+            "- Для дерматологии/косметологии используй медицинские термины:\n"
+            "  'dermal filler injection', 'chemical peel procedure', 'LED light therapy face'\n"
+            "- Если не уверен в визуале — используй 'woman dermatologist office', это безопасный фоллбэк.\n\n"
+            "ПРАВИЛА для overlay_type:\n"
             "  'corner' — маленький overlay в углу, спикер остаётся виден. Используй когда спикер упоминает конкретный предмет или продукт.\n"
             "  'fullscreen' — B-roll на весь экран (2 сек перебивка). Используй при смене темы или для визуальной передышки.\n\n"
             "Ответь ТОЛЬКО валидным JSON массивом, без markdown:\n"
             '[{"video_index": 1, "start_sec": 0.0, "end_sec": 5.0, '
-            '"broll_keyword": "woman applying moisturizer", "overlay_type": "corner"}]'
+            '"broll_keyword": "hyaluronic acid syringe closeup", "overlay_type": "corner"}]'
         )
 
         raw = await self._chat(prompt, max_tokens=1024)
