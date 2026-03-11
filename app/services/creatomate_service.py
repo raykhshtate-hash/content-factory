@@ -129,6 +129,63 @@ class CreatomateService:
         if not self.api_key:
             raise ValueError("CREATOMATE_API_KEY is not set")
 
+    def _build_broll_elements(self, broll_overlays: list[dict], track: int) -> list[dict]:
+        """Build Creatomate elements for B-roll overlays (corner or fullscreen)."""
+        elements = []
+        for ov in broll_overlays:
+            url = ov.get("url")
+            if not url:
+                continue
+
+            media_type = ov.get("type", "video")  # "video" | "image"
+            start_sec = float(ov.get("start_sec", 0))
+            end_sec = float(ov.get("end_sec", start_sec + 2))
+            overlay_type = ov.get("overlay_type", "corner")
+
+            if overlay_type == "fullscreen":
+                duration = min(2.0, end_sec - start_sec)
+                el = {
+                    "type": media_type,
+                    "track": track,
+                    "source": url,
+                    "time": start_sec,
+                    "duration": duration,
+                    "width": "100%",
+                    "height": "100%",
+                    "fit": "cover",
+                    "volume": "0%",
+                    "animations": [
+                        {"time": "start", "duration": 0.3, "type": "fade", "fade": "in"},
+                        {"time": "end",   "duration": 0.3, "type": "fade", "fade": "out"},
+                    ],
+                }
+            else:  # corner
+                duration = end_sec - start_sec
+                el = {
+                    "type": media_type,
+                    "track": track,
+                    "source": url,
+                    "time": start_sec,
+                    "duration": duration,
+                    "width": "35%",
+                    "x": "5%",
+                    "y": "15%",
+                    "x_alignment": "0%",
+                    "y_alignment": "0%",
+                    "border_radius": "20",
+                    "opacity": "0.9",
+                    "volume": "0%",
+                    "animations": [
+                        {"time": "start", "duration": 0.3, "type": "fade", "fade": "in"},
+                        {"time": "end",   "duration": 0.3, "type": "fade", "fade": "out"},
+                    ],
+                }
+                if media_type == "video":
+                    el["fit"] = "cover"
+
+            elements.append(el)
+        return elements
+
     async def create_render(
         self,
         clips: list[Clip],
@@ -137,6 +194,7 @@ class CreatomateService:
         karaoke: bool = True,
         quality: str = "prod",
         overlays: list[dict] | None = None,
+        broll_overlays: list[dict] | None = None,
         webhook_url: str | None = None,
     ) -> str:
         """
@@ -283,6 +341,10 @@ class CreatomateService:
                 }
                 elements.append(overlay_el)
 
+        # ── B-roll overlays (Pexels video/photo) ─────────────
+        if broll_overlays:
+            elements.extend(self._build_broll_elements(broll_overlays, track=4))
+
         # ── Final source JSON ─────────────────────────────────
         source = {
             "output_format": "mp4",
@@ -294,8 +356,8 @@ class CreatomateService:
         }
 
         logger.info(
-            "Creatomate render: format=%s, quality=%s (%dx%d@%dfps), clips=%d, karaoke=%s, overlays=%d, mood=%s",
-            video_format, quality, width, height, fps, len(clips), karaoke, len(overlays or []), music_mood,
+            "Creatomate render: format=%s, quality=%s (%dx%d@%dfps), clips=%d, karaoke=%s, overlays=%d, broll=%d, mood=%s",
+            video_format, quality, width, height, fps, len(clips), karaoke, len(overlays or []), len(broll_overlays or []), music_mood,
         )
         logger.debug("Creatomate source payload:\n%s", json.dumps(source, indent=2))
 
