@@ -75,3 +75,20 @@ sh scripts/deploy.sh
 - Cloud Run URL: `https://content-factory-7ufgsc2feq-ew.a.run.app`
 - GCS Bucket: configured via `GCS_BUCKET` env var
 - Drive INBOX Folder: `1ro3BwV7-u0wKq51PboVRMs2k1aeAs24L`
+
+
+## Known Issues
+- Emoji in Creatomate text elements — blinks/flickers in render. 
+  Plan: replace with B-roll overlays (stock video/photo via Pexels API).
+
+## Do NOT Refactor
+- handlers.py callback flow — tested, complex state machine
+- deploy.sh webhook setup — includes allowed_updates
+- Presigned URL caching in gcs_service
+
+## Next Feature: B-roll Overlays
+- Gemini already provides timecodes + scene topics
+- Claude will generate broll_keyword (English) for each scene
+- Pexels API (free) → search video/photo by keyword
+- Creatomate: overlay element with fade animation on correct timecode
+- Replaces emoji completely — no emoji in render, only in caption
