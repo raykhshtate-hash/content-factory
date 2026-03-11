@@ -193,6 +193,74 @@ class ClaudeService:
         except (json.JSONDecodeError, KeyError, TypeError):
             return []
 
+    async def generate_broll_keywords(
+        self,
+        script: str,
+        clip_candidates: list[dict],
+    ) -> list[dict]:
+        """
+        For each clip candidate, generate a Pexels search keyword and overlay type.
+
+        :param script: The Russian content script.
+        :param clip_candidates: List of dicts from Gemini with keys:
+            video_index, start_sec, end_sec, reason (and optionally scene_topic).
+        :return: List of dicts:
+            {video_index, start_sec, end_sec, broll_keyword, overlay_type}
+            overlay_type: "corner" | "fullscreen"
+        """
+        clips_block = "\n".join(
+            f"- Клип {c['video_index']} [{c['start_sec']:.1f}s–{c['end_sec']:.1f}s]: {c.get('reason', '')}"
+            for c in clip_candidates
+        )
+        prompt = (
+            "Ты — режиссёр монтажа Instagram Reels для дерматолога.\n\n"
+            "Сценарий видео (на русском):\n"
+            f"{script}\n\n"
+            "Выбранные клипы (таймкоды и описание сцены от AI-анализа):\n"
+            f"{clips_block}\n\n"
+            "ЗАДАЧА: Для каждого клипа придумай B-roll overlay.\n\n"
+            "ПРАВИЛА:\n"
+            "- broll_keyword — короткий поисковый запрос на АНГЛИЙСКОМ для Pexels (2-3 слова, конкретный визуал).\n"
+            "  Хорошие примеры: 'woman applying moisturizer', 'dermatologist office', 'skin texture closeup'\n"
+            "  Плохие примеры: 'beauty', 'health', 'medicine' (слишком абстрактно)\n"
+            "- overlay_type:\n"
+            "  'corner' — маленький overlay в углу, спикер остаётся виден. Используй когда спикер упоминает конкретный предмет или продукт.\n"
+            "  'fullscreen' — B-roll на весь экран (2 сек перебивка). Используй при смене темы или для визуальной передышки.\n\n"
+            "Ответь ТОЛЬКО валидным JSON массивом, без markdown:\n"
+            '[{"video_index": 1, "start_sec": 0.0, "end_sec": 5.0, '
+            '"broll_keyword": "woman applying moisturizer", "overlay_type": "corner"}]'
+        )
+
+        raw = await self._chat(prompt, max_tokens=1024)
+        raw = re.sub(r"^```(?:json)?\s*", "", raw, flags=re.MULTILINE)
+        raw = re.sub(r"\s*```$", "", raw, flags=re.MULTILINE).strip()
+
+        try:
+            items = json.loads(raw)
+            result = []
+            for item, clip in zip(items, clip_candidates):
+                overlay_type = item.get("overlay_type", "corner")
+                result.append({
+                    "video_index": clip["video_index"],
+                    "start_sec": clip["start_sec"],
+                    "end_sec": clip["end_sec"],
+                    "broll_keyword": str(item.get("broll_keyword", "skincare routine"))[:60],
+                    "overlay_type": overlay_type if overlay_type in ("corner", "fullscreen") else "corner",
+                })
+            return result
+        except (json.JSONDecodeError, KeyError, TypeError):
+            # Fallback: return clips with generic keyword
+            return [
+                {
+                    "video_index": c["video_index"],
+                    "start_sec": c["start_sec"],
+                    "end_sec": c["end_sec"],
+                    "broll_keyword": "skincare routine",
+                    "overlay_type": "corner",
+                }
+                for c in clip_candidates
+            ]
+
     async def suggest_formats(self, idea_text: str) -> list[str]:
         """
         Suggest the three best content formats for a given idea.
