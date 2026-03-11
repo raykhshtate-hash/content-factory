@@ -115,64 +115,29 @@ class CreatomateService:
             raise ValueError("CREATOMATE_API_KEY is not set")
 
     def _build_broll_elements(self, broll_overlays: list[dict], track: int) -> list[dict]:
-        """Build Creatomate elements for B-roll overlays (sticker or split)."""
+        """Build Creatomate sticker elements for B-roll overlays."""
         elements = []
-        for ov in broll_overlays:
+        for idx, ov in enumerate(broll_overlays):
             url = ov.get("url")
             if not url:
                 continue
 
-            media_type = ov.get("type", "image")
             start_sec = float(ov.get("start_sec", 0))
-            end_sec = float(ov.get("end_sec", start_sec + 2))
-            overlay_type = ov.get("overlay_type", "sticker")
+            x = "25%" if idx % 2 == 0 else "75%"
 
-            if overlay_type == "split":
-                duration = min(2.0, end_sec - start_sec)
-                el = {
-                    "type": media_type,
-                    "track": track,
-                    "source": url,
-                    "time": start_sec,
-                    "duration": duration,
-                    "x": "75%",
-                    "y": "50%",
-                    "width": "50%",
-                    "height": "100%",
-                    "x_alignment": "50%",
-                    "y_alignment": "50%",
-                    "fit": "cover",
-                    "volume": "0%",
-                    "animations": [
-                        {"time": "start", "duration": 0.4, "type": "slide", "direction": "right-left"},
-                        {"time": "end",   "duration": 0.4, "type": "slide", "direction": "left-right"},
-                    ],
-                }
-            else:  # sticker
-                el = {
-                    "type": media_type if media_type == "image" else "image",
-                    "track": track,
-                    "source": url,
-                    "time": start_sec,
-                    "duration": 1.2,
-                    "width": "30%",
-                    "x": "65%",
-                    "y": "15%",
-                    "x_alignment": "50%",
-                    "y_alignment": "50%",
-                    "border_radius": "20",
-                    "background_color": "#ffffff",
-                    "background_x_padding": "3%",
-                    "background_y_padding": "3%",
-                    "shadow_color": "rgba(0,0,0,0.3)",
-                    "shadow_blur": "20",
-                    "shadow_x": "0",
-                    "shadow_y": "4",
-                    "animations": [
-                        {"time": "start", "duration": 0.4, "type": "scale", "easing": "back-out", "start_scale": "0%"},
-                        {"time": "end",   "duration": 0.3, "type": "scale", "easing": "back-in",  "end_scale": "0%"},
-                    ],
-                }
+            el = {
+                "type": "image",
+                "track": track,
+                "source": url,
+                "time": start_sec,
+                "duration": 2.5,
+                "width": "25%",
+                "height": "25%",
+                "x": x,
+                "y": "18%",
+                "border_radius": 50,
+                "fit": "cover",
+            }
 
             elements.append(el)
         return elements

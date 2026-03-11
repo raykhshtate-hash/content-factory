@@ -55,31 +55,21 @@ def map_broll_to_render_timeline(
 
     mapped: list[dict] = []
 
-    for item in broll_items:
-        source_time = float(item.get("start_sec", 0))
-        source_end = float(item.get("end_sec", source_time + 2))
-        original_duration = source_end - source_time
+    for item, window in zip(broll_items, clip_windows):
+        # Place overlay at 40% into the clip's duration on the render timeline
+        render_time = window["render_start"] + (window["trim_duration"] * 0.4)
 
-        # Find the clip window this source_time falls into
-        matched = None
-        for window in clip_windows:
-            if window["source_start"] <= source_time < window["source_end"]:
-                matched = window
-                break
-
-        if matched is None:
+        if render_time < 1.5:
             logger.debug(
-                "B-roll at source %.2fs dropped — outside all clip windows (keyword=%r)",
-                source_time, item.get("broll_keyword"),
+                "B-roll dropped — render_time %.2fs < 1.5s (keyword=%r)",
+                render_time, item.get("broll_keyword"),
             )
             continue
-
-        render_time = matched["render_start"] + (source_time - matched["source_start"])
 
         new_item = {
             **item,
             "start_sec": render_time,
-            "end_sec": render_time + original_duration,
+            "end_sec": render_time + 2.5,
             "render_time": render_time,
         }
         mapped.append(new_item)

@@ -230,12 +230,10 @@ class ClaudeService:
             "- Для дерматологии/косметологии используй медицинские термины:\n"
             "  'dermal filler injection', 'chemical peel procedure', 'LED light therapy face'\n"
             "- Если не уверен в визуале — используй 'woman dermatologist office', это безопасный фоллбэк.\n\n"
-            "ПРАВИЛА для overlay_type:\n"
-            "  'sticker' — маленькая фото-наклейка в углу экрана. Спикер остаётся виден. Используй когда спикер упоминает конкретный предмет (крем, шприц, прибор) — покажи этот предмет.\n"
-            "  'split' — экран делится пополам: спикер слева, B-roll справа. Используй при смене темы, сравнении до/после, или когда нужен сильный визуал.\n\n"
+            "ВАЖНО: Сгенерируй keyword для КАЖДОЙ сцены из списка, не пропускай ни одну.\n\n"
             "Ответь ТОЛЬКО валидным JSON массивом, без markdown:\n"
             '[{"video_index": 1, "start_sec": 0.0, "end_sec": 5.0, '
-            '"broll_keyword": "hyaluronic acid syringe closeup", "overlay_type": "sticker"}]'
+            '"broll_keyword": "hyaluronic acid syringe closeup"}]'
         )
 
         raw = await self._chat(prompt, max_tokens=1024)
@@ -246,17 +244,15 @@ class ClaudeService:
             items = json.loads(raw)
             result = []
             for item, clip in zip(items, clip_candidates):
-                overlay_type = item.get("overlay_type", "corner")
                 result.append({
                     "video_index": clip["video_index"],
                     "start_sec": clip["start_sec"],
                     "end_sec": clip["end_sec"],
                     "broll_keyword": str(item.get("broll_keyword", "skincare routine"))[:60],
-                    "overlay_type": overlay_type if overlay_type in ("sticker", "split") else "sticker",
+                    "overlay_type": "sticker",
                 })
             return result
         except (json.JSONDecodeError, KeyError, TypeError):
-            # Fallback: return clips with generic keyword
             return [
                 {
                     "video_index": c["video_index"],
