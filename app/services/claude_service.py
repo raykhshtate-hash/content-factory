@@ -231,11 +231,11 @@ class ClaudeService:
             "  'dermal filler injection', 'chemical peel procedure', 'LED light therapy face'\n"
             "- Если не уверен в визуале — используй 'woman dermatologist office', это безопасный фоллбэк.\n\n"
             "ПРАВИЛА для overlay_type:\n"
-            "  'corner' — маленький overlay в углу, спикер остаётся виден. Используй когда спикер упоминает конкретный предмет или продукт.\n"
-            "  'fullscreen' — B-roll на весь экран (2 сек перебивка). Используй при смене темы или для визуальной передышки.\n\n"
+            "  'sticker' — маленькая фото-наклейка в углу экрана. Спикер остаётся виден. Используй когда спикер упоминает конкретный предмет (крем, шприц, прибор) — покажи этот предмет.\n"
+            "  'split' — экран делится пополам: спикер слева, B-roll справа. Используй при смене темы, сравнении до/после, или когда нужен сильный визуал.\n\n"
             "Ответь ТОЛЬКО валидным JSON массивом, без markdown:\n"
             '[{"video_index": 1, "start_sec": 0.0, "end_sec": 5.0, '
-            '"broll_keyword": "hyaluronic acid syringe closeup", "overlay_type": "corner"}]'
+            '"broll_keyword": "hyaluronic acid syringe closeup", "overlay_type": "sticker"}]'
         )
 
         raw = await self._chat(prompt, max_tokens=1024)
@@ -252,7 +252,7 @@ class ClaudeService:
                     "start_sec": clip["start_sec"],
                     "end_sec": clip["end_sec"],
                     "broll_keyword": str(item.get("broll_keyword", "skincare routine"))[:60],
-                    "overlay_type": overlay_type if overlay_type in ("corner", "fullscreen") else "corner",
+                    "overlay_type": overlay_type if overlay_type in ("sticker", "split") else "sticker",
                 })
             return result
         except (json.JSONDecodeError, KeyError, TypeError):
@@ -263,7 +263,7 @@ class ClaudeService:
                     "start_sec": c["start_sec"],
                     "end_sec": c["end_sec"],
                     "broll_keyword": "skincare routine",
-                    "overlay_type": "corner",
+                    "overlay_type": "sticker",
                 }
                 for c in clip_candidates
             ]

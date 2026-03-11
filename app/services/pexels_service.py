@@ -112,15 +112,15 @@ async def search_broll(
     keyword: str,
     orientation: str = "portrait",
 ) -> dict | None:
-    """Search video first, fall back to photo. Returns result with 'type' field."""
-    result = await search_video(keyword, orientation=orientation)
-    if result:
-        result["type"] = "video"
-        return result
-
+    """Search photo first, fall back to video. Photos work better for stickers."""
     result = await search_photo(keyword, orientation=orientation)
     if result:
         result["type"] = "image"
+        return result
+
+    result = await search_video(keyword, orientation=orientation)
+    if result:
+        result["type"] = "video"
         return result
 
     logger.warning("No Pexels results for keyword: %s", keyword)
