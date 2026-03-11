@@ -342,19 +342,8 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
         analysis_data = json.loads(raw_analysis) if isinstance(raw_analysis, str) else raw_analysis
         music_mood = analysis_data.get("suggested_music_mood")
 
-    # Pop-up overlays: Claude reads script and generates emoji/text popups
-    overlays = []
-    script_text = item.get("script", "")
-    if script_text:
-        total_dur = sum(c.trim_duration for c in clips)
-        try:
-            overlays = await claude.generate_overlays(script_text, total_dur)
-            logger.debug("[Render] Claude generated %d overlays", len(overlays))
-        except Exception as e:
-            logger.warning("Overlay generation failed (non-fatal): %s", e)
-            overlays = []
-
     # B-roll overlays: Claude generates keywords → Pexels search (parallel)
+    script_text = item.get("script", "")
     broll_overlays = []
     if script_text and raw_analysis:
         analysis_data = json.loads(raw_analysis) if isinstance(raw_analysis, str) else raw_analysis
@@ -397,7 +386,6 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
             music_mood=music_mood,
             karaoke=True,
             quality=quality,
-            overlays=overlays,
             broll_overlays=broll_overlays or None,
             webhook_url=webhook_url,
         )

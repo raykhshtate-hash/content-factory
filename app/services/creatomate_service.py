@@ -107,21 +107,6 @@ KARAOKE_STYLES: dict[str, dict] = {
 }
 
 
-# ── Pop-up overlay position mapping ─────────────────────────────
-OVERLAY_POSITIONS = {
-    "top-left":      {"x": "18%", "y": "15%"},
-    "top-right":     {"x": "82%", "y": "15%"},
-    "center":        {"x": "50%", "y": "45%"},
-    "bottom-left":   {"x": "18%", "y": "65%"},
-    "bottom-right":  {"x": "82%", "y": "65%"},
-}
-
-OVERLAY_SIZES = {
-    "small":  "18 vmin",
-    "medium": "24 vmin",
-    "large":  "30 vmin",
-}
-
 
 class CreatomateService:
     def __init__(self, api_key: str | None = None):
@@ -193,7 +178,6 @@ class CreatomateService:
         music_mood: str | None = None,
         karaoke: bool = True,
         quality: str = "prod",
-        overlays: list[dict] | None = None,
         broll_overlays: list[dict] | None = None,
         webhook_url: str | None = None,
     ) -> str:
@@ -300,47 +284,6 @@ class CreatomateService:
         total_duration = current_time
         elements.extend(karaoke_elements)
 
-        # ── Pop-up overlays (emoji/text) ───────────────────────
-        if overlays:
-            for ov in overlays:
-                pos = OVERLAY_POSITIONS.get(ov.get("position", "top-right"), OVERLAY_POSITIONS["top-right"])
-                font_size = OVERLAY_SIZES.get(ov.get("size", "medium"), OVERLAY_SIZES["medium"])
-
-                overlay_el = {
-                    "type": "text",
-                    "track": 3,
-                    "text": ov.get("content", "✨"),
-                    "time": ov["time"],
-                    "duration": ov["duration"],
-                    "width": "40%",
-                    "height": "12%",
-                    "x": pos["x"],
-                    "y": pos["y"],
-                    "x_alignment": "50%",
-                    "y_alignment": "50%",
-                    "font_size": font_size,
-                    "fill_color": "#FFFFFF",
-                    "stroke_color": "#000000",
-                    "stroke_width": "1.2 vmin",
-                    "shadow_color": "rgba(0,0,0,0.5)",
-                    "shadow_blur": "2 vmin",
-                    "animations": [
-                        {
-                            "time": "start",
-                            "duration": 0.2,
-                            "type": "fade",
-                            "fade": "in",
-                        },
-                        {
-                            "time": "end",
-                            "duration": 0.2,
-                            "type": "fade",
-                            "fade": "out",
-                        },
-                    ],
-                }
-                elements.append(overlay_el)
-
         # ── B-roll overlays (Pexels video/photo) ─────────────
         if broll_overlays:
             elements.extend(self._build_broll_elements(broll_overlays, track=4))
@@ -356,8 +299,8 @@ class CreatomateService:
         }
 
         logger.info(
-            "Creatomate render: format=%s, quality=%s (%dx%d@%dfps), clips=%d, karaoke=%s, overlays=%d, broll=%d, mood=%s",
-            video_format, quality, width, height, fps, len(clips), karaoke, len(overlays or []), len(broll_overlays or []), music_mood,
+            "Creatomate render: format=%s, quality=%s (%dx%d@%dfps), clips=%d, karaoke=%s, broll=%d, mood=%s",
+            video_format, quality, width, height, fps, len(clips), karaoke, len(broll_overlays or []), music_mood,
         )
         logger.debug("Creatomate source payload:\n%s", json.dumps(source, indent=2))
 
