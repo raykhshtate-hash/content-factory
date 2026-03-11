@@ -70,6 +70,7 @@ from app.services.drive_service import DriveService
 from app.services.gcs_service import GCSService
 from app.services.gemini_service import GeminiService, VideoAnalysis
 from app.services.creatomate_service import CreatomateService, Clip
+from app.services import pexels_service
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -353,9 +354,42 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
             logger.warning("Overlay generation failed (non-fatal): %s", e)
             overlays = []
 
+    # B-roll overlays: Claude generates keywords → Pexels search (parallel)
+    broll_overlays = []
+    if script_text and raw_analysis:
+        analysis_data = json.loads(raw_analysis) if isinstance(raw_analysis, str) else raw_analysis
+        candidates = analysis_data.get("clip_candidates", [])
+        if candidates:
+            # Convert MM:SS.s timecodes to seconds for Claude
+            clip_secs = []
+            for c in candidates:
+                clip_secs.append({
+                    "video_index": c.get("video_index", 1),
+                    "start_sec": _parse_mmss(c["start_time"]),
+                    "end_sec": _parse_mmss(c["end_time"]),
+                    "reason": c.get("reason", ""),
+                })
+            try:
+                broll_keywords = await claude.generate_broll_keywords(script_text, clip_secs)
+
+                async def _fetch_broll(kw: dict) -> dict | None:
+                    media = await pexels_service.search_broll(kw["broll_keyword"])
+                    if media:
+                        return {**kw, "url": media["url"], "type": media["type"]}
+                    return None
+
+                results = await asyncio.gather(
+                    *[_fetch_broll(kw) for kw in broll_keywords],
+                    return_exceptions=True,
+                )
+                broll_overlays = [r for r in results if isinstance(r, dict)]
+                logger.info("[Render] B-roll: %d/%d keywords found media", len(broll_overlays), len(broll_keywords))
+            except Exception as e:
+                logger.warning("B-roll generation failed (non-fatal): %s", e)
+
     creatomate = CreatomateService()
     quality_label = "🧪 Dev (720p)" if quality == "dev" else "🚀 Prod (1080p)"
-    logger.debug("[Render] video_format=%r, music_mood=%r, clips=%d, quality=%s", video_format, music_mood, len(clips), quality)
+    logger.debug("[Render] video_format=%r, music_mood=%r, clips=%d, quality=%s, broll=%d", video_format, music_mood, len(clips), quality, len(broll_overlays))
     try:
         render_id = await creatomate.create_render(
             clips=clips,
@@ -364,6 +398,7 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
             karaoke=True,
             quality=quality,
             overlays=overlays,
+            broll_overlays=broll_overlays or None,
             webhook_url=webhook_url,
         )
 
