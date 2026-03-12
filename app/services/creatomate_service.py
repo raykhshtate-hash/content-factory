@@ -115,11 +115,11 @@ class CreatomateService:
             raise ValueError("CREATOMATE_API_KEY is not set")
 
     def _build_broll_elements(self, broll_overlays: list[dict], track: int) -> list[dict]:
-        """Build Creatomate sticker elements for B-roll overlays."""
+        """Build Creatomate AI-generated sticker elements for B-roll overlays."""
         elements = []
         for idx, ov in enumerate(broll_overlays):
-            url = ov.get("url")
-            if not url:
+            prompt = ov.get("broll_keyword")
+            if not prompt:
                 continue
 
             start_sec = float(ov.get("start_sec", 0))
@@ -128,15 +128,22 @@ class CreatomateService:
             el = {
                 "type": "image",
                 "track": track,
-                "source": url,
                 "time": start_sec,
-                "duration": 2.5,
-                "width": "25%",
-                "height": "25%",
+                "duration": 4.0,
                 "x": x,
                 "y": "18%",
-                "border_radius": 50,
+                "width": "25%",
+                "height": "25%",
+                "source": prompt,
+                "provider": "openai model=gpt-image-1.5",
+                "dynamic": True,
                 "fit": "cover",
+                "border_radius": 50,
+                "opacity": "85%",
+                "animations": [
+                    {"time": "start", "duration": 0.5, "type": "fade"},
+                    {"time": "end", "duration": 0.5, "type": "fade"}
+                ],
             }
 
             elements.append(el)
@@ -255,7 +262,7 @@ class CreatomateService:
         total_duration = current_time
         elements.extend(karaoke_elements)
 
-        # ── B-roll overlays (Pexels video/photo) ─────────────
+        # ── B-roll overlays (AI-generated images) ─────────────
         if broll_overlays:
             elements.extend(self._build_broll_elements(broll_overlays, track=4))
 

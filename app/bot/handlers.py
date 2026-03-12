@@ -70,7 +70,6 @@ from app.services.drive_service import DriveService
 from app.services.gcs_service import GCSService
 from app.services.gemini_service import GeminiService, VideoAnalysis
 from app.services.creatomate_service import CreatomateService, Clip
-from app.services import pexels_service
 from app.services.timeline_utils import map_broll_to_render_timeline
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
@@ -343,7 +342,7 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
         analysis_data = json.loads(raw_analysis) if isinstance(raw_analysis, str) else raw_analysis
         music_mood = analysis_data.get("suggested_music_mood")
 
-    # B-roll overlays: Claude generates keywords → Pexels search (parallel)
+    # B-roll overlays: Claude generates AI image prompts
     script_text = item.get("script", "")
     broll_overlays = []
     if script_text and raw_analysis:
@@ -360,24 +359,17 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
                     "reason": c.get("reason", ""),
                 })
             try:
-                broll_keywords = await claude.generate_broll_keywords(script_text, clip_secs)
+                broll_prompts = await claude.generate_broll_prompts(script_text, clip_secs)
 
-                async def _fetch_broll(kw: dict) -> dict | None:
-                    media = await pexels_service.search_broll(kw["broll_keyword"])
-                    if media:
-                        return {**kw, "url": media["url"], "type": media["type"]}
-                    return None
-
-                results = await asyncio.gather(
-                    *[_fetch_broll(kw) for kw in broll_keywords],
-                    return_exceptions=True,
-                )
-                broll_overlays = [r for r in results if isinstance(r, dict)]
-                logger.info("[Render] B-roll: %d/%d keywords found media", len(broll_overlays), len(broll_keywords))
+                # Calculate total render duration
+                total_render_duration = sum(c.trim_duration for c in clips)
 
                 # Remap source timecodes → render timeline
                 clips_as_dicts = [c.__dict__ for c in clips]
-                broll_overlays = map_broll_to_render_timeline(broll_overlays, clips_as_dicts)
+                broll_overlays = map_broll_to_render_timeline(
+                    broll_prompts, clips_as_dicts, total_render_duration
+                )
+                logger.info("[Render] B-roll: %d AI prompts generated", len(broll_overlays))
             except Exception as e:
                 logger.warning("B-roll generation failed (non-fatal): %s", e)
 

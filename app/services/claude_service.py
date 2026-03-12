@@ -193,20 +193,20 @@ class ClaudeService:
         except (json.JSONDecodeError, KeyError, TypeError):
             return []
 
-    async def generate_broll_keywords(
+    async def generate_broll_prompts(
         self,
         script: str,
         clip_candidates: list[dict],
     ) -> list[dict]:
         """
-        For each clip candidate, generate a Pexels search keyword and overlay type.
+        For each clip candidate, generate an AI image generation prompt.
 
         :param script: The Russian content script.
         :param clip_candidates: List of dicts from Gemini with keys:
             video_index, start_sec, end_sec, reason (and optionally scene_topic).
         :return: List of dicts:
-            {video_index, start_sec, end_sec, broll_keyword, overlay_type}
-            overlay_type: "corner" | "fullscreen"
+            {video_index, start_sec, end_sec, broll_keyword}
+            broll_keyword contains the AI image prompt
         """
         clips_block = "\n".join(
             f"- Клип {c['video_index']} [{c['start_sec']:.1f}s–{c['end_sec']:.1f}s]: {c.get('reason', '')}"
@@ -218,22 +218,21 @@ class ClaudeService:
             f"{script}\n\n"
             "Выбранные клипы (таймкоды и описание сцены от AI-анализа):\n"
             f"{clips_block}\n\n"
-            "ЗАДАЧА: Для каждого клипа придумай B-roll overlay.\n\n"
-            "ПРАВИЛА для broll_keyword:\n"
-            "- ОБЯЗАТЕЛЬНО 2-3 слова. Одно слово ЗАПРЕЩЕНО.\n"
-            "- Описывай КОНКРЕТНЫЙ предмет или действие, НЕ абстрактную сцену.\n"
-            "  ХОРОШО: 'hyaluronic acid syringe', 'face cream jar closeup', 'woman touching face skin'\n"
-            "  ПЛОХО: 'beauty', 'skincare', 'cream', 'woman shower' (слишком абстрактно или широко)\n"
-            "- К предметам ВСЕГДА добавляй 'closeup' или 'product':\n"
-            "  'cream' → 'face cream jar closeup'\n"
-            "  'injection' → 'cosmetic injection procedure closeup'\n"
-            "- Для дерматологии/косметологии используй медицинские термины:\n"
-            "  'dermal filler injection', 'chemical peel procedure', 'LED light therapy face'\n"
-            "- Если не уверен в визуале — используй 'woman dermatologist office', это безопасный фоллбэк.\n\n"
-            "ВАЖНО: Сгенерируй keyword для КАЖДОЙ сцены из списка, не пропускай ни одну.\n\n"
+            "ЗАДАЧА: Для каждого клипа создай текстовый prompt на английском для генерации AI-изображения (sticker overlay).\n\n"
+            "ПРАВИЛА для broll_keyword (prompt):\n"
+            "- Опиши конкретный предмет или объект, связанный с дерматологией/косметологией\n"
+            "- ОБЯЗАТЕЛЬНО добавь в конец каждого промпта: ', isolated object, sticker style, no background, white background'\n"
+            "- Примеры ХОРОШИХ промптов:\n"
+            "  'skincare serum bottle with dropper, isolated object, sticker style, no background, white background'\n"
+            "  'hyaluronic acid syringe, isolated object, sticker style, no background, white background'\n"
+            "  'face cream jar with lid open, isolated object, sticker style, no background, white background'\n"
+            "  'dermatologist examining skin with magnifying glass, isolated object, sticker style, no background, white background'\n"
+            "- Используй медицинские термины для точности: serum, dermal filler, chemical peel, LED therapy, etc.\n"
+            "- Если не уверен — используй универсальный фоллбэк: 'skincare product, isolated object, sticker style, no background, white background'\n\n"
+            "ВАЖНО: Сгенерируй prompt для КАЖДОЙ сцены из списка, не пропускай ни одну.\n\n"
             "Ответь ТОЛЬКО валидным JSON массивом, без markdown:\n"
             '[{"video_index": 1, "start_sec": 0.0, "end_sec": 5.0, '
-            '"broll_keyword": "hyaluronic acid syringe closeup"}]'
+            '"broll_keyword": "hyaluronic acid syringe, isolated object, sticker style, no background, white background"}]'
         )
 
         raw = await self._chat(prompt, max_tokens=1024)
@@ -244,11 +243,15 @@ class ClaudeService:
             items = json.loads(raw)
             result = []
             for item, clip in zip(items, clip_candidates):
+                prompt_text = str(item.get("broll_keyword", "skincare product"))
+                # Ensure the suffix is present
+                if "isolated object, sticker style" not in prompt_text:
+                    prompt_text += ", isolated object, sticker style, no background, white background"
                 result.append({
                     "video_index": clip["video_index"],
                     "start_sec": clip["start_sec"],
                     "end_sec": clip["end_sec"],
-                    "broll_keyword": str(item.get("broll_keyword", "skincare routine"))[:60],
+                    "broll_keyword": prompt_text[:200],  # Increased limit for longer prompts
                     "overlay_type": "sticker",
                 })
             return result
@@ -258,7 +261,7 @@ class ClaudeService:
                     "video_index": c["video_index"],
                     "start_sec": c["start_sec"],
                     "end_sec": c["end_sec"],
-                    "broll_keyword": "skincare routine",
+                    "broll_keyword": "skincare product, isolated object, sticker style, no background, white background",
                     "overlay_type": "sticker",
                 }
                 for c in clip_candidates

@@ -13,11 +13,13 @@ import logging
 logger = logging.getLogger(__name__)
 
 MIN_GAP_SECONDS = 2.0  # minimum gap between two b-roll overlays on render timeline
+DONUT_DURATION = 4.0  # duration of each donut overlay in seconds
 
 
 def map_broll_to_render_timeline(
     broll_items: list[dict],
     selected_clips: list[dict],
+    total_render_duration: float | None = None,
 ) -> list[dict]:
     """
     Map b-roll overlay timecodes from source video space → render timeline.
@@ -30,6 +32,9 @@ def map_broll_to_render_timeline(
     :param selected_clips: List of clip dicts, each must have:
         - trim_start    (float): start of this clip in the source video
         - trim_duration (float): duration of this clip
+
+    :param total_render_duration: Total duration of the final render (optional).
+        If provided, donuts that would extend beyond this are either shifted or dropped.
 
     :return: Filtered, remapped list with `render_time` added and
         `start_sec`/`end_sec` replaced with render-relative values.
@@ -53,12 +58,17 @@ def map_broll_to_render_timeline(
         })
         render_cursor += trim_duration
 
+    # If total_render_duration not provided, calculate from clips
+    if total_render_duration is None:
+        total_render_duration = render_cursor
+
     mapped: list[dict] = []
 
     for item, window in zip(broll_items, clip_windows):
         # Place overlay at 40% into the clip's duration on the render timeline
         render_time = window["render_start"] + (window["trim_duration"] * 0.4)
 
+        # Drop if too early (before 1.5s)
         if render_time < 1.5:
             logger.debug(
                 "B-roll dropped — render_time %.2fs < 1.5s (keyword=%r)",
@@ -66,10 +76,30 @@ def map_broll_to_render_timeline(
             )
             continue
 
+        # Check if donut would extend beyond video end
+        donut_end = render_time + DONUT_DURATION
+        if donut_end > total_render_duration:
+            # Try to shift donut earlier to fit within video bounds
+            render_time = total_render_duration - DONUT_DURATION
+
+            # If still too early (before 1.5s), drop this donut entirely
+            if render_time < 1.5:
+                logger.debug(
+                    "B-roll dropped — would extend beyond video end (%.2fs + %.2fs > %.2fs, keyword=%r)",
+                    render_time, DONUT_DURATION, total_render_duration, item.get("broll_keyword"),
+                )
+                continue
+
+            logger.debug(
+                "B-roll shifted earlier — was %.2fs, now %.2fs to fit within %.2fs (keyword=%r)",
+                render_time + (window["trim_duration"] * 0.4), render_time,
+                total_render_duration, item.get("broll_keyword"),
+            )
+
         new_item = {
             **item,
             "start_sec": render_time,
-            "end_sec": render_time + 2.5,
+            "end_sec": render_time + DONUT_DURATION,
             "render_time": render_time,
         }
         mapped.append(new_item)
