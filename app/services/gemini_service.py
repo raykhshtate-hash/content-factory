@@ -22,6 +22,7 @@ class ClipCandidate(BaseModel):
     start_time: str = Field(description="Время начала клипа в формате MM:SS.s (с десятыми секунды), например 01:23.5")
     end_time: str = Field(description="Время окончания клипа в формате MM:SS.s (с десятыми секунды), например 01:37.0. Включи запас 0.5с после конца фразы")
     reason: str = Field(description="Почему этот момент потенциально виральный")
+    scene_label: str = Field(description="К какой сцене сценария относится этот клип: HOOK, STORY, PIVOT, CLOSING", default="")
 
 
 class VideoAnalysis(BaseModel):

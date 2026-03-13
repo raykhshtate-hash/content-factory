@@ -196,6 +196,13 @@ async def analyze_and_propose(chat_id: int, item_id: str, gcs_uris: list[str], s
             f"{scenario_text}\n\n"
             "ТВОЯ ГЛАВНАЯ ЗАДАЧА: Найди фрагменты на видео, где спикер произносит фразы, максимально близкие по смыслу или тексту к этому сценарию. "
             "Твои выбранные моменты должны собираться в этот сценарий.\n\n"
+            # DISABLED: scene_label prompt instructions — changed Gemini clip selection behavior
+            # "СТРУКТУРА СЦЕНАРИЯ: Типичный сценарий Reels состоит из сцен:\n"
+            # "- HOOK (хук, первые 1-3 секунды) — захватывающее начало\n"
+            # "- STORY (основная часть) — развитие истории, факты, советы\n"
+            # "- PIVOT (опциональный поворот/контраст)\n"
+            # "- CLOSING (финал) — вывод, призыв к действию\n\n"
+            # "Для каждого клипа укажи scene_label (HOOK/STORY/PIVOT/CLOSING) — к какой сцене сценария относится этот момент.\n\n"
         )
         
     prompt += (
@@ -367,7 +374,8 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
                 # Remap source timecodes → render timeline
                 clips_as_dicts = [c.__dict__ for c in clips]
                 broll_overlays = map_broll_to_render_timeline(
-                    broll_prompts, clips_as_dicts, total_render_duration
+                    broll_prompts, clips_as_dicts, total_render_duration,
+                    max_duration=2.0 if music_mood in ("energetic", "funny", "upbeat") else 4.0,
                 )
                 logger.info("[Render] B-roll: %d AI prompts generated", len(broll_overlays))
             except Exception as e:
@@ -452,6 +460,17 @@ async def on_render_callback(callback: types.CallbackQuery, state: FSMContext):
 
             analysis = json.loads(raw) if isinstance(raw, str) else raw
             candidates = analysis.get("clip_candidates", [])
+
+            # DISABLED: scene_label sorting — caused clip trimming issues
+            # # Sort by scene_label if present (HOOK → STORY → PIVOT → CLOSING)
+            # scene_order = {"HOOK": 0, "STORY": 1, "PIVOT": 2, "CLOSING": 3}
+            # if candidates and any(c.get("scene_label") for c in candidates):
+            #     candidates = sorted(
+            #         candidates,
+            #         key=lambda c: scene_order.get(c.get("scene_label", "").upper(), 999)
+            #     )
+            #     logger.info("[Render] Sorted %d clips by scene_label", len(candidates))
+
             clips = await _candidates_to_clips(candidates, gcs_uris, gcs_service)
 
             if not clips:

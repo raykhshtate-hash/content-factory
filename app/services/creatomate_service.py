@@ -114,7 +114,7 @@ class CreatomateService:
         if not self.api_key:
             raise ValueError("CREATOMATE_API_KEY is not set")
 
-    def _build_broll_elements(self, broll_overlays: list[dict], track: int) -> list[dict]:
+    def _build_broll_elements(self, broll_overlays: list[dict], track: int, mood: str = "chill") -> list[dict]:
         """Build Creatomate AI-generated sticker elements for B-roll overlays."""
         elements = []
         for idx, ov in enumerate(broll_overlays):
@@ -123,13 +123,15 @@ class CreatomateService:
                 continue
 
             start_sec = float(ov.get("start_sec", 0))
+            donut_duration = float(ov.get("donut_duration", 4.0))
+            fade_duration = min(0.5, donut_duration * 0.15)
             x = "25%" if idx % 2 == 0 else "75%"
 
             el = {
                 "type": "image",
                 "track": track,
                 "time": start_sec,
-                "duration": 4.0,
+                "duration": donut_duration,
                 "x": x,
                 "y": "18%",
                 "width": "25%",
@@ -141,8 +143,8 @@ class CreatomateService:
                 "border_radius": 50,
                 "opacity": "85%",
                 "animations": [
-                    {"time": "start", "duration": 0.5, "type": "fade"},
-                    {"time": "end", "duration": 0.5, "type": "fade"}
+                    {"time": "start", "duration": fade_duration, "type": "fade"},
+                    {"time": "end", "duration": fade_duration, "type": "fade"}
                 ],
             }
 
@@ -200,6 +202,9 @@ class CreatomateService:
             # Transition only on scene change (different source video)
             is_scene_change = i > 0 and clip.source != clips[i - 1].source
 
+            adjusted_trim_start = max(0, clip.trim_start - 0.5)
+            adjusted_duration = clip.trim_duration + (clip.trim_start - adjusted_trim_start)
+
             video_el = {
                 "type": "video",
                 "name": clip_name,
@@ -209,13 +214,13 @@ class CreatomateService:
                 "height": "100%",
                 "fit": "cover",
                 "time": current_time,
-                "trim_start": clip.trim_start,
-                "trim_duration": clip.trim_duration,
-                "duration": clip.trim_duration,
+                "trim_start": adjusted_trim_start,
+                "trim_duration": adjusted_duration,
+                "duration": adjusted_duration,
                 "animations": [
                     {
                         "time": "start",
-                        "duration": clip.trim_duration,
+                        "duration": adjusted_duration,
                         "easing": "linear",
                         "type": "scale",
                         "scope": "element",
@@ -241,7 +246,7 @@ class CreatomateService:
                     "transcript_effect": "karaoke",
                     "transcript_maximum_length": 15,
                     "time": current_time,
-                    "duration": clip.trim_duration,
+                    "duration": adjusted_duration,
                     "width": "90%",
                     "height": "20%",
                     "x": "50%",
@@ -257,14 +262,14 @@ class CreatomateService:
                 karaoke_el.update(style)
                 karaoke_elements.append(karaoke_el)
 
-            current_time += clip.trim_duration
+            current_time += adjusted_duration
 
         total_duration = current_time
         elements.extend(karaoke_elements)
 
         # ── B-roll overlays (AI-generated images) ─────────────
         if broll_overlays:
-            elements.extend(self._build_broll_elements(broll_overlays, track=4))
+            elements.extend(self._build_broll_elements(broll_overlays, track=4, mood=music_mood or "chill"))
 
         # ── Final source JSON ─────────────────────────────────
         source = {
