@@ -46,14 +46,12 @@ class DriveService:
         self._drive_build = build("drive", "v3", credentials=self._creds)
 
     # ------------------------------------------------------------------
-    # list_inbox_files
+    # list_folder_files  +  typed wrappers
     # ------------------------------------------------------------------
-    def list_inbox_files(self) -> list[dict]:
-        """Return list of file metadata dicts from Drive INBOX folder."""
-        folder_id = settings.DRIVE_INBOX_FOLDER_ID
+    def list_folder_files(self, folder_id: str) -> list[dict]:
+        """Return list of file metadata dicts from any Drive folder."""
         if not folder_id:
-            raise RuntimeError("DRIVE_INBOX_FOLDER_ID is not configured.")
-
+            return []
         results = (
             self._drive_build.files()
             .list(
@@ -66,6 +64,12 @@ class DriveService:
             .execute()
         )
         return results.get("files", [])
+
+    def list_talking_head_files(self) -> list[dict]:
+        return self.list_folder_files(settings.DRIVE_TALKING_HEAD_FOLDER_ID)
+
+    def list_storyboard_files(self) -> list[dict]:
+        return self.list_folder_files(settings.DRIVE_STORYBOARD_FOLDER_ID)
 
     # ------------------------------------------------------------------
     # copy_to_gcs  —  the DE Hack (zero-buffer streaming)

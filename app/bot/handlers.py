@@ -70,12 +70,14 @@ from app.services.drive_service import DriveService
 from app.services.gcs_service import GCSService
 from app.services.gemini_service import GeminiService, VideoAnalysis
 from app.services.creatomate_service import CreatomateService, Clip
-from app.services.timeline_utils import map_broll_to_render_timeline
+# map_broll_to_render_timeline kept in timeline_utils.py for potential future Pexels/GIF use
+from app.services.audio_processing import process_voiceover, get_duration as get_media_duration
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 import asyncio
 import json
+import subprocess
 import uuid
 
 async def update_progress(message: types.Message, stage: int, text: str = ""):
@@ -91,6 +93,267 @@ async def update_progress(message: types.Message, stage: int, text: str = ""):
         await message.edit_text(f"{bar}\n\n{text}".strip())
     except Exception:
         pass
+
+async def storyboard_render(
+    chat_id: int,
+    item_id: str,
+    video_gcs_uris: list[str],
+    voiceover_gcs_uri: str,
+    status_msg: types.Message,
+    quality: str = "dev",
+):
+    """Storyboard render: process audio + Gemini scene mapping + Creatomate."""
+
+    gcs_service = GCSService()
+
+    # ── Step 1: Get video durations via ffprobe ──
+    await update_progress(status_msg, 2, "Storyboard: определяю длительность видео...")
+
+    video_durations = []
+    for uri in video_gcs_uris:
+        signed = await asyncio.to_thread(gcs_service.generate_presigned_url, uri)
+        dur = await get_media_duration(signed)
+        if dur <= 0:
+            dur = 5.0
+            logger.warning("Could not get duration for %s, fallback 5.0s", uri)
+        video_durations.append(dur)
+
+    total_video_duration = sum(video_durations)
+    logger.info("Video durations: %s (total=%.1fs)", video_durations, total_video_duration)
+
+    # ── Step 2: Process voiceover (silence removal + speedup) ──
+    await update_progress(status_msg, 2,
+        f"Обрабатываю озвучку (убираю паузы, подгоняю скорость)...\n"
+        f"Видео: {total_video_duration:.0f}с"
+    )
+
+    try:
+        processed_uri, processed_duration, speedup = await process_voiceover(
+            voiceover_gcs_uri=voiceover_gcs_uri,
+            total_video_duration=total_video_duration,
+            video_durations=video_durations,
+            max_speedup=1.5,
+            silence_threshold_sec=1.0,
+        )
+    except Exception as e:
+        logger.error("Audio processing failed: %s", e)
+        # Fallback: use original audio without processing
+        processed_uri = voiceover_gcs_uri
+        signed = await asyncio.to_thread(gcs_service.generate_presigned_url, voiceover_gcs_uri)
+        processed_duration = await get_media_duration(signed)
+        speedup = 1.0
+        await update_progress(status_msg, 2, "⚠️ Не удалось обработать аудио, использую оригинал.")
+        await asyncio.sleep(2)
+
+    duration_diff = abs(processed_duration - total_video_duration)
+    if duration_diff > 3.0:
+        await update_progress(status_msg, 2,
+            f"⚠️ После обработки: аудио {processed_duration:.0f}с, видео {total_video_duration:.0f}с "
+            f"(разница {duration_diff:.0f}с, ускорение {speedup:.1f}x).\n"
+            f"Продолжаю — Gemini подгонит таймкоды."
+        )
+        await asyncio.sleep(2)
+    else:
+        await update_progress(status_msg, 2,
+            f"Аудио обработано: {processed_duration:.0f}с (ускорение {speedup:.1f}x)."
+        )
+
+    # ── Step 3: Gemini storyboard analysis ──
+    await update_progress(status_msg, 3, "Gemini анализирует видео + озвучку...")
+
+    item = await supabase_service.get_item(item_id)
+    scenario_text = item.get("script", "") if item else ""
+
+    gemini = GeminiService()
+    analysis = await gemini.analyze_storyboard(
+        video_gcs_uris=video_gcs_uris,
+        audio_gcs_uri=processed_uri,
+        scenario_text=scenario_text,
+        video_durations=video_durations,
+        audio_duration=processed_duration,
+    )
+
+    if not analysis:
+        # Fallback: equal split without Gemini
+        logger.warning("Gemini storyboard analysis failed, using equal split")
+        segment_duration = processed_duration / len(video_gcs_uris) if video_gcs_uris else 5.0
+
+        clips = []
+        for uri in video_gcs_uris:
+            signed = await asyncio.to_thread(gcs_service.generate_presigned_url, uri)
+            clips.append(Clip(
+                source=signed,
+                trim_start=0.0,
+                trim_duration=segment_duration,
+            ))
+
+        voiceover_signed = await asyncio.to_thread(
+            gcs_service.generate_presigned_url, processed_uri
+        )
+
+    else:
+        # Safety net: cap scenes that exceed video clip by more than 0.5s
+        for scene in analysis.scenes:
+            v_idx = scene.video_index - 1
+            if 0 <= v_idx < len(video_durations):
+                max_dur = video_durations[v_idx]
+                clip_dur = scene.audio_end - scene.audio_start
+                overflow = clip_dur - max_dur
+                if overflow > 0.5:
+                    logger.warning(
+                        "Scene %d: audio %.1fs exceeds video %.1fs by %.1fs — capping",
+                        scene.scene_id, clip_dur, max_dur, overflow,
+                    )
+                    scene.audio_end = scene.audio_start + max_dur
+
+        # ── Step 4: Build clips from Gemini analysis ──
+        clips = []
+        for scene in analysis.scenes:
+            v_idx = scene.video_index - 1
+            if v_idx < 0 or v_idx >= len(video_gcs_uris):
+                v_idx = 0
+
+            signed = await asyncio.to_thread(
+                gcs_service.generate_presigned_url, video_gcs_uris[v_idx]
+            )
+            clip_duration = scene.audio_end - scene.audio_start
+            clips.append(Clip(
+                source=signed,
+                trim_start=scene.video_trim_start,
+                trim_duration=clip_duration,
+            ))
+
+        voiceover_signed = await asyncio.to_thread(
+            gcs_service.generate_presigned_url, processed_uri
+        )
+
+    # ── Step 4b: Visual Director — Claude picks transitions + stickers ──
+    from app.services.visual_director import get_visual_blueprint
+    from app.services.creatomate_service import apply_visual_blueprint
+
+    clips_info = [
+        {"index": i, "duration": clip.trim_duration}
+        for i, clip in enumerate(clips)
+    ]
+
+    # Extract visual descriptions from Gemini storyboard analysis
+    clip_descriptions = None
+    if analysis and hasattr(analysis, "scenes"):
+        descs = [getattr(s, "visual_description", "") for s in analysis.scenes]
+        logger.info(f"Clip descriptions: {descs}")
+        if any(descs):
+            clip_descriptions = descs
+
+    blueprint = await get_visual_blueprint(
+        scenario_text=scenario_text,
+        clips=clips_info,
+        render_mode="storyboard",
+        clip_descriptions=clip_descriptions,
+    )
+
+    logger.info(
+        "Visual style: %s, reason: %s",
+        blueprint["overall_style"],
+        blueprint.get("reasoning", "n/a"),
+    )
+    logger.debug("Visual blueprint: %s", blueprint)
+
+    # ── Step 5: Build source, apply blueprint, audio compensation ──
+    await update_progress(status_msg, 3, "Запускаю рендер...")
+
+    webhook_url = f"{settings.BASE_URL}/webhooks/creatomate/{item_id}"
+    video_format = item.get("format", "reels") if item else "reels"
+
+    music_mood = "professional"
+    if analysis and analysis.suggested_music_mood:
+        music_mood = analysis.suggested_music_mood
+
+    creatomate = CreatomateService()
+
+    try:
+        source = creatomate.build_source(
+            clips=clips,
+            video_format=video_format,
+            music_mood=music_mood,
+            karaoke=True,
+            quality=quality,
+            voiceover_url=voiceover_signed,
+            voiceover_duration=processed_duration,
+        )
+
+        source["elements"], transition_count = apply_visual_blueprint(
+            source["elements"], blueprint,
+            [c.trim_duration for c in clips],
+        )
+
+        # Audio compensation: transitions eat into timeline
+        if transition_count > 0:
+            from app.services.audio_processing import adjust_voiceover_for_transitions
+
+            total_overlap = transition_count * 0.5
+            new_vo_uri, new_vo_duration = await adjust_voiceover_for_transitions(
+                voiceover_gcs_uri=processed_uri,
+                overlap_seconds=total_overlap,
+                current_duration=processed_duration,
+            )
+            new_vo_url = await asyncio.to_thread(
+                gcs_service.generate_presigned_url, new_vo_uri
+            )
+            for el in source["elements"]:
+                if el.get("id") == "voiceover":
+                    el["source"] = new_vo_url
+                if el.get("transcript_source") == "voiceover":
+                    el["duration"] = new_vo_duration
+
+        render_id = await creatomate.submit_render(source, webhook_url)
+
+        await supabase_service.update_item(
+            item_id,
+            status="rendering",
+            creatomate_render_id=render_id,
+            selected_clips=[c.__dict__ for c in clips],
+        )
+
+        quality_label = "🧪 Dev (720p)" if quality == "dev" else "🚀 Prod (1080p)"
+        await update_progress(status_msg, 4,
+            f"🎬 Storyboard ({quality_label})! Ускорение {speedup:.1f}x.\n"
+            f"Монтирую... Пришлю результат когда будет готово."
+        )
+    except RuntimeError as e:
+        logger.error(f"Storyboard render failed: {e}")
+        await supabase_service.update_item(item_id, status="awaiting_footage")
+        try:
+            await status_msg.edit_text(
+                "❌ Ошибка запуска рендера. Попробуй нажать /ready ещё раз."
+            )
+        except Exception:
+            pass
+
+
+async def _get_duration_ffprobe(url: str) -> float:
+    """Get media duration via ffprobe from a URL. Reads only headers — fast."""
+    try:
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [
+                "ffprobe", "-v", "quiet",
+                "-print_format", "json",
+                "-show_format",
+                url,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            logger.warning("ffprobe failed (rc=%d): %s", result.returncode, result.stderr[:200])
+            return 0.0
+        data = json.loads(result.stdout)
+        return float(data.get("format", {}).get("duration", 0))
+    except Exception as e:
+        logger.warning("ffprobe exception: %s", e)
+        return 0.0
+
 
 @router.message(Command("ready"))
 async def cmd_ready(message: types.Message):
@@ -114,35 +377,79 @@ async def cmd_ready(message: types.Message):
     
     drive_service = DriveService()
     gcs_service = GCSService()
-    
-    # 2. Drive → GCS sync
+
+    # 2. Check both folders
     try:
-        inbox_files = drive_service.list_inbox_files()
-        video_extensions = ('.mov', '.mp4', '.avi', '.mkv', '.webm')
-        inbox_files = [f for f in inbox_files if f['name'].lower().endswith(video_extensions)]
+        th_files = drive_service.list_talking_head_files()
+        sb_files = drive_service.list_storyboard_files()
     except Exception as e:
         await update_progress(status_msg, 0, f"❌ Ошибка доступа к Google Drive: {e}")
         await supabase_service.update_item(item_id, status="awaiting_footage")
         return
-        
-    if not inbox_files:
-        await update_progress(status_msg, 0, "⚠️ В папке INBOX пусто! Пожалуйста, загрузи туда видео и нажми /ready снова.")
+
+    VIDEO_EXT = ('.mov', '.mp4', '.avi', '.mkv', '.webm')
+    AUDIO_EXT = ('.mp3', '.m4a', '.wav', '.aac', '.ogg')
+
+    th_videos = [f for f in th_files if f['name'].lower().endswith(VIDEO_EXT)]
+    sb_videos = [f for f in sb_files if f['name'].lower().endswith(VIDEO_EXT)]
+    sb_audio = [f for f in sb_files if f['name'].lower().endswith(AUDIO_EXT)]
+
+    has_th = len(th_videos) > 0
+    has_sb = len(sb_videos) > 0
+
+    if has_th and has_sb:
+        await update_progress(status_msg, 0,
+            "⚠️ Файлы найдены в обеих папках (talking_head и storyboard).\n"
+            "Оставь файлы только в одной и нажми /ready снова."
+        )
         await supabase_service.update_item(item_id, status="awaiting_footage")
         return
-        
-    await update_progress(status_msg, 1, f"Найдено файлов: {len(inbox_files)}.")
+
+    if not has_th and not has_sb:
+        await update_progress(status_msg, 0,
+            "⚠️ Обе папки пусты.\n"
+            "Загрузи видео в INBOX/talking_head или INBOX/storyboard и нажми /ready."
+        )
+        await supabase_service.update_item(item_id, status="awaiting_footage")
+        return
+
+    is_storyboard = has_sb
+
+    if is_storyboard:
+        if not sb_audio:
+            await update_progress(status_msg, 0,
+                "⚠️ В папке storyboard нет аудиофайла с озвучкой.\n"
+                "Загрузи озвучку (.mp3 / .m4a / .wav) вместе с видео и нажми /ready."
+            )
+            await supabase_service.update_item(item_id, status="awaiting_footage")
+            return
+
+        if len(sb_audio) > 1:
+            sb_audio.sort(key=lambda f: f['name'])
+            logger.warning("Multiple audio files in storyboard, using first: %s", sb_audio[0]['name'])
+
+        sb_videos.sort(key=lambda f: f['name'])
+        all_files = sb_videos + [sb_audio[0]]  # audio LAST — important for URI split later
+        source_label = "storyboard"
+    else:
+        all_files = th_videos
+        source_label = "talking_head"
+
+    await update_progress(status_msg, 1,
+        f"Найдено файлов: {len(all_files)} ({source_label})."
+    )
     
     gcs_bucket = settings.GCS_BUCKET_NAME
     gcs_uris = []
     failed_files = []
     
-    for idx, file_meta in enumerate(inbox_files, 1):
+    for idx, file_meta in enumerate(all_files, 1):
         file_id = file_meta['id']
         file_name = file_meta['name']
         gcs_path = f"footage/{item_id}/{uuid.uuid4().hex[:8]}_{file_name}"
-        
+
         try:
-            await update_progress(status_msg, 1, f"Файл {idx}/{len(inbox_files)}: {file_name}\n(Видео скачиваются 10-15 сек/файл)...")
+            await update_progress(status_msg, 1, f"Файл {idx}/{len(all_files)}: {file_name}\n(Видео скачиваются 10-15 сек/файл)...")
             gcs_uri = await asyncio.to_thread(drive_service.copy_to_gcs, file_id, gcs_bucket, gcs_path)
             gcs_uris.append(gcs_uri)
         except Exception as e:
@@ -164,17 +471,58 @@ async def cmd_ready(message: types.Message):
     error_summary = f"\n⚠️ Ошибок доступа (фото/файлы): {len(failed_files)}" if failed_files else ""
     await update_progress(status_msg, 2, f"Успешно скопировано: {len(gcs_uris)}{error_summary}")
         
+    # Split URIs based on mode
+    if is_storyboard:
+        # Audio was added last in all_files, so last GCS URI is voiceover
+        video_gcs_uris = gcs_uris[:-1]
+        voiceover_gcs_uri = gcs_uris[-1]
+    else:
+        video_gcs_uris = gcs_uris
+        voiceover_gcs_uri = None
+
     # Phase update
-    try:
-        await supabase_service.update_item(item_id, status="analyzing", gcs_uris=gcs_uris)
-    except Exception:
-        # Fallback if gcs_uris column doesn't exist in Supabase yet
-        await supabase_service.update_item(item_id, status="analyzing")
-    
-    # 3. Fire background task for Gemini
-    # We're already inside a BackgroundTask from the webhook handler,
-    # so a plain await keeps the CPU alive in Cloud Run.
-    await analyze_and_propose(message.chat.id, item_id, gcs_uris, status_msg)
+    if is_storyboard:
+        try:
+            await supabase_service.update_item(
+                item_id,
+                status="ready_for_storyboard",
+                content_mode="storyboard",
+                gcs_uris=video_gcs_uris,
+                voiceover_gcs_uri=voiceover_gcs_uri,
+            )
+        except Exception:
+            await supabase_service.update_item(
+                item_id,
+                status="ready_for_storyboard",
+                content_mode="storyboard",
+            )
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="🧪 Dev (720p, быстро)",
+                callback_data=f"storyboard:dev:{item_id}"
+            )],
+            [InlineKeyboardButton(
+                text="🚀 Prod (1080p, финал)",
+                callback_data=f"storyboard:prod:{item_id}"
+            )],
+        ])
+        await status_msg.edit_text(
+            "🎬 Storyboard mode! Выбери качество:",
+            reply_markup=keyboard,
+        )
+    else:
+        try:
+            await supabase_service.update_item(
+                item_id,
+                status="analyzing",
+                content_mode="talking_head",
+                gcs_uris=video_gcs_uris,
+            )
+        except Exception:
+            await supabase_service.update_item(item_id, status="analyzing")
+
+        await analyze_and_propose(message.chat.id, item_id, video_gcs_uris, status_msg)
 
 
 async def analyze_and_propose(chat_id: int, item_id: str, gcs_uris: list[str], status_msg: types.Message):
@@ -349,51 +697,54 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
         analysis_data = json.loads(raw_analysis) if isinstance(raw_analysis, str) else raw_analysis
         music_mood = analysis_data.get("suggested_music_mood")
 
-    # B-roll overlays: Claude generates AI image prompts
+    # TODO: old broll pipeline, replaced by visual_director
+    # Keep code for potential Pexels/GIF future use
+    # script_text = item.get("script", "")
+    # broll_overlays = []
+    # if script_text and raw_analysis:
+    #     ...
+
+    # Visual Director: Claude picks transitions + sticker overlays
+    from app.services.visual_director import get_visual_blueprint
+    from app.services.creatomate_service import apply_visual_blueprint
+
     script_text = item.get("script", "")
-    broll_overlays = []
-    if script_text and raw_analysis:
-        analysis_data = json.loads(raw_analysis) if isinstance(raw_analysis, str) else raw_analysis
-        candidates = analysis_data.get("clip_candidates", [])
-        if candidates:
-            # Convert MM:SS.s timecodes to seconds for Claude
-            clip_secs = []
-            for c in candidates:
-                clip_secs.append({
-                    "video_index": c.get("video_index", 1),
-                    "start_sec": _parse_mmss(c["start_time"]),
-                    "end_sec": _parse_mmss(c["end_time"]),
-                    "reason": c.get("reason", ""),
-                })
-            try:
-                broll_prompts = await claude.generate_broll_prompts(script_text, clip_secs)
+    clips_info = [
+        {"index": i, "duration": clip.trim_duration}
+        for i, clip in enumerate(clips)
+    ]
 
-                # Calculate total render duration
-                total_render_duration = sum(c.trim_duration for c in clips)
+    blueprint = await get_visual_blueprint(
+        scenario_text=script_text,
+        clips=clips_info,
+        render_mode="talking_head",
+    )
 
-                # Remap source timecodes → render timeline
-                clips_as_dicts = [c.__dict__ for c in clips]
-                broll_overlays = map_broll_to_render_timeline(
-                    broll_prompts, clips_as_dicts, total_render_duration,
-                    max_duration=2.0 if music_mood in ("energetic", "funny", "upbeat") else 4.0,
-                )
-                logger.info("[Render] B-roll: %d AI prompts generated", len(broll_overlays))
-            except Exception as e:
-                logger.warning("B-roll generation failed (non-fatal): %s", e)
+    logger.info(
+        "Visual style: %s, reason: %s",
+        blueprint["overall_style"],
+        blueprint.get("reasoning", "n/a"),
+    )
+    logger.debug("Visual blueprint: %s", blueprint)
 
     creatomate = CreatomateService()
     quality_label = "🧪 Dev (720p)" if quality == "dev" else "🚀 Prod (1080p)"
-    logger.debug("[Render] video_format=%r, music_mood=%r, clips=%d, quality=%s, broll=%d", video_format, music_mood, len(clips), quality, len(broll_overlays))
+    logger.debug("[Render] video_format=%r, music_mood=%r, clips=%d, quality=%s", video_format, music_mood, len(clips), quality)
     try:
-        render_id = await creatomate.create_render(
+        source = creatomate.build_source(
             clips=clips,
             video_format=video_format,
             music_mood=music_mood,
             karaoke=True,
             quality=quality,
-            broll_overlays=broll_overlays or None,
-            webhook_url=webhook_url,
         )
+
+        source["elements"], _ = apply_visual_blueprint(
+            source["elements"], blueprint,
+            [c.trim_duration for c in clips],
+        )
+
+        render_id = await creatomate.submit_render(source, webhook_url)
 
         await supabase_service.update_item(
             item_id,
@@ -410,6 +761,54 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
             await callback.message.answer("❌ Произошла ошибка при запуске сборки видео (сервер не отвечает). Попробуй нажать /ready ещё раз.")
         except Exception:
             pass
+
+
+@router.callback_query(F.data.startswith("storyboard:"))
+async def on_storyboard_quality(callback: types.CallbackQuery):
+    parts = callback.data.split(":")
+    quality = parts[1]
+    item_id = parts[2]
+
+    item = await supabase_service.get_item(item_id)
+    if not item:
+        await callback.answer("Запись не найдена", show_alert=True)
+        return
+
+    # Idempotency: block duplicate clicks
+    current_status = item.get("status", "")
+    if current_status in ("rendering", "pending_approval", "approved"):
+        await callback.answer("⏳ Уже обрабатывается!", show_alert=True)
+        return
+
+    # Immediately mark as rendering + answer callback to stop Telegram retries
+    await supabase_service.update_item(item_id, status="rendering")
+    await callback.answer()
+
+    # Remove keyboard to prevent re-clicks
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    video_gcs_uris = item.get("gcs_uris") or []
+    voiceover_gcs_uri = item.get("voiceover_gcs_uri")
+
+    if not video_gcs_uris or not voiceover_gcs_uri:
+        await supabase_service.update_item(item_id, status="awaiting_footage")
+        try:
+            await callback.message.edit_text("❌ Нет файлов для рендера.")
+        except Exception:
+            pass
+        return
+
+    await storyboard_render(
+        callback.message.chat.id,
+        item_id,
+        video_gcs_uris,
+        voiceover_gcs_uri,
+        callback.message,
+        quality=quality,
+    )
 
 
 @router.callback_query(F.data.startswith("render:"))
@@ -577,22 +976,19 @@ async def _process_idea(message: types.Message, idea_text: str):
         # 1. Update idea text in DB
         await supabase_service.update_item(item_id, idea_text=idea_text)
         
-        # 2. Generate script via Claude
-        script = await claude.generate_script(content_format, idea_text)
-        
-        # 3. Save script — wait for user approval
+        # 2. Passthrough: сценарий уже готов, не генерируем
+        # script = await claude.generate_script(content_format, idea_text)
+        logger.info("Scenario passthrough: using idea_text as script")
+
+        # 3. Save script directly, skip approval
         await supabase_service.update_item(
             item_id,
-            status="awaiting_script_approval",
-            script=script
+            status="awaiting_footage",
+            script=idea_text,
         )
 
-        # 4. Send script with approve/edit buttons
-        keyboard = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="Одобрить ✅", callback_data=f"script:approve:{item_id}")],
-            [InlineKeyboardButton(text="Редактировать ✏️", callback_data=f"script:edit:{item_id}")]
-        ])
-        await message.answer(messages.SCRIPT_READY_MESSAGE.format(script=script), reply_markup=keyboard)
+        # 4. Prompt user to upload footage
+        await message.answer("Сценарий принят. Загрузи видео в Drive INBOX и нажми /ready")
     else:
         # No active format selected -> Ideation mode / suggest formats
         await message.answer("Анализирую твою идею...")

@@ -77,13 +77,14 @@ async def process_creatomate_render(item_id: str, payload: dict):
             analysis = json.loads(raw_analysis) if isinstance(raw_analysis, str) else raw_analysis
             visual_risk = analysis.get("visual_risk", "none")
             
-        claude = ClaudeService(api_key=settings.ANTHROPIC_API_KEY)
-        visual_risk_list = [visual_risk] if str(visual_risk).lower() != "none" else []
-        
-        compliance_result = await claude.check_compliance(script_text, visual_risk_list)
-        is_compliant = compliance_result.get("ok", False)
-        issues = compliance_result.get("issues", [])
-        
+        # TODO: re-enable compliance for medical content only
+        # Currently disabled — false positives on lifestyle content
+        # claude = ClaudeService(api_key=settings.ANTHROPIC_API_KEY)
+        # visual_risk_list = [visual_risk] if str(visual_risk).lower() != "none" else []
+        # compliance_result = await claude.check_compliance(script_text, visual_risk_list)
+        # is_compliant = compliance_result.get("ok", False)
+        # issues = compliance_result.get("issues", [])
+
         # 4. Delivery via Telegram
         bot = Bot(token=settings.BOT_TOKEN)
         try:
@@ -92,21 +93,20 @@ async def process_creatomate_render(item_id: str, payload: dict):
                 [InlineKeyboardButton(text="❌ Отклонить / Переделать", callback_data=f"reject:{item_id}")]
             ])
 
-            caption = "🎬 Твое видео готово!\n\n"
-            
-            if not is_compliant or visual_risk_list:
-                caption += "⚠️ Выявлены риски!\n"
-                if visual_risk_list:
-                    caption += f"👁 Визуально: {visual_risk}\n"
-                if issues:
-                    caption += "📝 " + "; ".join(issues[:3]) + "\n"
-            else:
-                caption += "✅ Комплаенс пройден.\n"
-            
-            # Telegram caption limit: 1024 chars
-            if len(caption) > 1024:
-                caption = caption[:1020] + "..."
+            caption = "🎬 Твое видео готово!\n"
                 
+            # Check if already delivered (race condition guard)
+            render_id = payload.get("id", "unknown")
+            item_check = await supabase_service.get_item(item_id)
+            current_status = item_check.get("status") if item_check else None
+            logger.info(f"Webhook delivery: item={item_id}, render={render_id}, status={current_status}")
+            if current_status in ("pending_approval", "approved", "published"):
+                logger.warning(f"Already delivered {item_id}, skipping")
+                return
+
+            # Lock: update status BEFORE sending to block duplicate webhooks
+            await supabase_service.update_item(item_id, status="pending_approval")
+
             video_file = FSInputFile(tmp_path)
             await bot.send_video(
                 chat_id=chat_id,
@@ -116,12 +116,6 @@ async def process_creatomate_render(item_id: str, payload: dict):
                 width=1080,
                 height=1920,
                 supports_streaming=True,
-            )
-            
-            # 5. Database Update
-            await supabase_service.update_item(
-                item_id, 
-                status="pending_approval",
             )
             
         except Exception as e:
@@ -150,15 +144,22 @@ async def creatomate_webhook(item_id: str, request: Request, background_tasks: B
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
+    render_id = payload.get("id", "unknown")
+    status = payload.get("status", "unknown")
+    logger.info(f"Webhook received: render_id={render_id}, status={status}, item_id={item_id}")
+
     # 2. Idempotency Check
     item = await supabase_service.get_item(item_id)
     if not item:
         raise HTTPException(status_code=404, detail="Item not found")
         
     current_status = item.get("status")
-    if current_status in ["pending_approval", "approved", "render_failed"]:
+    if current_status in ["pending_approval", "approved", "render_failed", "delivering"]:
         logger.info(f"Webhook idempotency stop: item {item_id} already in status {current_status}")
         return {"ok": True, "message": "Already processed"}
+
+    # Immediately mark as delivering to block duplicate webhooks
+    await supabase_service.update_item(item_id, status="delivering")
 
     # 3. Offload to background task so Creatomate gets an immediate 200 OK
     background_tasks.add_task(process_creatomate_render, item_id, payload)

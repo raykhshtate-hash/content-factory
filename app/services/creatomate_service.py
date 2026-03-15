@@ -106,6 +106,115 @@ KARAOKE_STYLES: dict[str, dict] = {
     },
 }
 
+# ── Transition presets (legacy, used by Gemini storyboard fallback) ──
+TRANSITION_MAP = {
+    "cut": None,
+    "crossfade": {"type": "crossfade"},
+    "slide-left": {"type": "slide", "direction": "left"},
+    "slide-right": {"type": "slide", "direction": "right"},
+    "wipe": {"type": "wipe"},
+    "circular-wipe": {"type": "circular-wipe"},
+}
+
+
+def apply_visual_blueprint(
+    elements: list[dict],
+    blueprint: dict,
+    clip_durations: list[float],
+) -> tuple[list[dict], int]:
+    """Apply visual blueprint (transitions + sticker overlays) to elements.
+
+    Returns (modified_elements, applied_transition_count).
+    """
+    video_elements = [el for el in elements if el.get("type") == "video"]
+    transition_count = 0
+    sticker_idx = 0
+
+    # ── Compute render start time for each clip ──
+    clip_render_starts = []
+    t = 0.0
+    for vel in video_elements:
+        clip_render_starts.append(t)
+        t += vel.get("duration", vel.get("trim_duration", 0))
+    total_render_duration = t
+
+    for clip_info in blueprint.get("clips", []):
+        idx = clip_info.get("index", 0)
+
+        # ── Transitions ──
+        transition = clip_info.get("transition")
+        if transition is not None:
+            if 0 < idx < len(video_elements):
+                dur = clip_durations[idx] if idx < len(clip_durations) else 0
+                if dur >= 2.5:
+                    video_el = video_elements[idx]
+                    if "animations" not in video_el:
+                        video_el["animations"] = []
+
+                    anim = {
+                        "type": transition["type"],
+                        "time": 0,
+                        # Duration 0.5s is fixed starting value.
+                        # Replace with clip_duration-based formula after
+                        # manual UI testing confirms optimal range.
+                        "duration": 0.5,
+                        "transition": True,
+                    }
+
+                    for key in ("direction", "color", "clockwise"):
+                        if key in transition:
+                            anim[key] = transition[key]
+
+                    video_el["animations"].append(anim)
+                    transition_count += 1
+
+    # ── Sticker overlays (top-level, timeline-based) ──
+    for overlay in blueprint.get("overlays", []):
+        if overlay.get("type") != "ai_image":
+            continue
+        prompt = overlay.get("image_prompt", "")
+        if not prompt:
+            continue
+        start = overlay.get("start_second")
+        end = overlay.get("end_second")
+        if start is None or end is None:
+            continue
+        sticker_duration = float(end - start)
+        if sticker_duration < 4.0:
+            continue
+        sticker_time = float(start)
+
+        # Guard: don't exceed total duration
+        if sticker_time + sticker_duration > total_render_duration:
+            continue
+
+        # Alternate position: even=right, odd=left
+        x = "75%" if sticker_idx % 2 == 0 else "25%"
+
+        # Sticker track: 4 for both modes
+        sticker_el = {
+            "type": "image",
+            "track": 4,
+            "time": sticker_time,
+            "duration": sticker_duration,
+            "x": x,
+            "y": "18%",
+            "width": "25%",
+            "height": "25%",
+            "source": prompt,
+            "provider": "openai model=gpt-image-1.5",
+            "dynamic": True,
+            "border_radius": 50,
+            "opacity": "85%",
+            "animations": [
+                {"time": 0, "duration": 0.3, "type": "fade"},
+                {"time": "end", "duration": 0.3, "type": "fade", "reversed": True},
+            ],
+        }
+        elements.append(sticker_el)
+        sticker_idx += 1
+
+    return elements, transition_count
 
 
 class CreatomateService:
@@ -114,61 +223,57 @@ class CreatomateService:
         if not self.api_key:
             raise ValueError("CREATOMATE_API_KEY is not set")
 
-    def _build_broll_elements(self, broll_overlays: list[dict], track: int, mood: str = "chill") -> list[dict]:
-        """Build Creatomate AI-generated sticker elements for B-roll overlays."""
-        elements = []
-        for idx, ov in enumerate(broll_overlays):
-            prompt = ov.get("broll_keyword")
-            if not prompt:
-                continue
+    # TODO: old broll pipeline, replaced by visual_director
+    # Keep code for potential Pexels/GIF future use
+    # def _build_broll_elements(self, broll_overlays: list[dict], track: int, mood: str = "chill") -> list[dict]:
+    #     """Build Creatomate AI-generated sticker elements for B-roll overlays."""
+    #     elements = []
+    #     for idx, ov in enumerate(broll_overlays):
+    #         prompt = ov.get("broll_keyword")
+    #         if not prompt:
+    #             continue
+    #         start_sec = float(ov.get("start_sec", 0))
+    #         donut_duration = float(ov.get("donut_duration", 4.0))
+    #         fade_duration = min(0.5, donut_duration * 0.15)
+    #         x = "25%" if idx % 2 == 0 else "75%"
+    #         el = {
+    #             "type": "image",
+    #             "track": track,
+    #             "time": start_sec,
+    #             "duration": donut_duration,
+    #             "x": x,
+    #             "y": "18%",
+    #             "width": "25%",
+    #             "height": "25%",
+    #             "source": prompt,
+    #             "provider": "openai model=gpt-image-1.5",
+    #             "dynamic": True,
+    #             "fit": "cover",
+    #             "border_radius": 50,
+    #             "opacity": "85%",
+    #             "animations": [
+    #                 {"time": "start", "duration": fade_duration, "type": "fade"},
+    #                 {"time": "end", "duration": fade_duration, "type": "fade"}
+    #             ],
+    #         }
+    #         elements.append(el)
+    #     return elements
 
-            start_sec = float(ov.get("start_sec", 0))
-            donut_duration = float(ov.get("donut_duration", 4.0))
-            fade_duration = min(0.5, donut_duration * 0.15)
-            x = "25%" if idx % 2 == 0 else "75%"
-
-            el = {
-                "type": "image",
-                "track": track,
-                "time": start_sec,
-                "duration": donut_duration,
-                "x": x,
-                "y": "18%",
-                "width": "25%",
-                "height": "25%",
-                "source": prompt,
-                "provider": "openai model=gpt-image-1.5",
-                "dynamic": True,
-                "fit": "cover",
-                "border_radius": 50,
-                "opacity": "85%",
-                "animations": [
-                    {"time": "start", "duration": fade_duration, "type": "fade"},
-                    {"time": "end", "duration": fade_duration, "type": "fade"}
-                ],
-            }
-
-            elements.append(el)
-        return elements
-
-    async def create_render(
+    def build_source(
         self,
         clips: list[Clip],
         video_format: str = "reels",
         music_mood: str | None = None,
         karaoke: bool = True,
         quality: str = "prod",
-        broll_overlays: list[dict] | None = None,
-        webhook_url: str | None = None,
-    ) -> str:
+        voiceover_url: str | None = None,
+        voiceover_duration: float = 0.0,
+    ) -> dict:
         """
-        Creates a dynamic JSON-based render request.
+        Build Creatomate source JSON (elements + metadata).
 
-        quality: "dev" (720p 24fps) or "prod" (1080p 60fps).
-        When karaoke=True, Creatomate auto-transcribes the audio and
-        highlights words in sync — no external Whisper/subtitles needed.
-
-        Returns render_id (str) on success, raises on failure.
+        Returns the source dict ready for submit_render() or further
+        modification (e.g. apply_visual_blueprint on source["elements"]).
         """
         preset = QUALITY_PRESETS.get(quality, QUALITY_PRESETS["prod"])
 
@@ -193,14 +298,6 @@ class CreatomateService:
 
         for i, clip in enumerate(clips):
             clip_name = f"clip-{i}"
-            # Ken Burns: even clips zoom in, odd clips zoom out
-            if i % 2 == 0:
-                start_scale, end_scale = "100%", "110%"
-            else:
-                start_scale, end_scale = "110%", "100%"
-
-            # Transition only on scene change (different source video)
-            is_scene_change = i > 0 and clip.source != clips[i - 1].source
 
             adjusted_trim_start = max(0, clip.trim_start - 0.5)
             adjusted_duration = clip.trim_duration + (clip.trim_start - adjusted_trim_start)
@@ -213,39 +310,23 @@ class CreatomateService:
                 "width": "100%",
                 "height": "100%",
                 "fit": "cover",
-                "time": current_time,
                 "trim_start": adjusted_trim_start,
                 "trim_duration": adjusted_duration,
                 "duration": adjusted_duration,
-                "animations": [
-                    {
-                        "time": "start",
-                        "duration": adjusted_duration,
-                        "easing": "linear",
-                        "type": "scale",
-                        "scope": "element",
-                        "start_scale": start_scale,
-                        "end_scale": end_scale,
-                    }
-                ],
             }
 
-            if is_scene_change:
-                video_el["transition"] = {
-                    "duration": 0.1,
-                    "type": "fade",
-                }
+            if voiceover_url:
+                video_el["volume"] = "0%"
 
             elements.append(video_el)
 
-            if karaoke:
+            if karaoke and not voiceover_url:
                 karaoke_el = {
                     "type": "text",
                     "track": 2,
                     "transcript_source": clip_name,
                     "transcript_effect": "karaoke",
                     "transcript_maximum_length": 15,
-                    "time": current_time,
                     "duration": adjusted_duration,
                     "width": "90%",
                     "height": "20%",
@@ -255,7 +336,7 @@ class CreatomateService:
                     "y_alignment": "50%",
                     "font_family": "Montserrat",
                     "font_weight": "700",
-                    "font_size": "8 vmin",
+                    "font_size": "6 vmin",
                     "stroke_color": "#000000",
                     "stroke_width": "1.6 vmin",
                 }
@@ -265,11 +346,44 @@ class CreatomateService:
             current_time += adjusted_duration
 
         total_duration = current_time
-        elements.extend(karaoke_elements)
 
-        # ── B-roll overlays (AI-generated images) ─────────────
-        if broll_overlays:
-            elements.extend(self._build_broll_elements(broll_overlays, track=4, mood=music_mood or "chill"))
+        if voiceover_url:
+            # Voiceover audio track
+            elements.append({
+                "type": "audio",
+                "id": "voiceover",
+                "track": 2,
+                "time": 0,
+                "source": voiceover_url,
+                "volume": "100%",
+            })
+
+            # Single karaoke element for entire timeline, synced to voiceover
+            if karaoke:
+                vo_karaoke = {
+                    "type": "text",
+                    "track": 3,
+                    "transcript_source": "voiceover",
+                    "transcript_effect": "karaoke",
+                    "transcript_maximum_length": 15,
+                    "time": 0,
+                    "duration": voiceover_duration if voiceover_duration > 0 else total_duration,
+                    "width": "90%",
+                    "height": "20%",
+                    "x": "50%",
+                    "y": "78%",
+                    "x_alignment": "50%",
+                    "y_alignment": "50%",
+                    "font_family": "Montserrat",
+                    "font_weight": "700",
+                    "font_size": "6 vmin",
+                    "stroke_color": "#000000",
+                    "stroke_width": "1.6 vmin",
+                }
+                vo_karaoke.update(style)
+                elements.append(vo_karaoke)
+        else:
+            elements.extend(karaoke_elements)
 
         # ── Final source JSON ─────────────────────────────────
         source = {
@@ -277,17 +391,32 @@ class CreatomateService:
             "width": width,
             "height": height,
             "frame_rate": fps,
-            "duration": total_duration,
             "elements": elements,
         }
+        if not voiceover_url:
+            source["duration"] = total_duration
 
         logger.info(
-            "Creatomate render: format=%s, quality=%s (%dx%d@%dfps), clips=%d, karaoke=%s, broll=%d, mood=%s",
-            video_format, quality, width, height, fps, len(clips), karaoke, len(broll_overlays or []), music_mood,
+            "Creatomate source built: format=%s, quality=%s (%dx%d@%dfps), clips=%d, "
+            "karaoke=%s, mood=%s, voiceover=%s",
+            video_format, quality, width, height, fps, len(clips), karaoke,
+            music_mood, bool(voiceover_url),
         )
+
+        return source
+
+    async def submit_render(
+        self,
+        source: dict,
+        webhook_url: str | None = None,
+    ) -> str:
+        """
+        Send source JSON to Creatomate API.
+
+        Returns render_id (str) on success, raises on failure.
+        """
         logger.debug("Creatomate source payload:\n%s", json.dumps(source, indent=2))
 
-        # ── Send POST to Creatomate ───────────────────────────
         api_key = settings.CREATOMATE_API_KEY
         if not api_key:
             raise ValueError("No Creatomate API key configured.")
@@ -322,5 +451,46 @@ class CreatomateService:
         render = data[0] if isinstance(data, list) else data
         render_id = render["id"]
 
-        logger.info("Creatomate render created: %s (quality=%s)", render_id, quality)
+        logger.info("Creatomate render created: %s", render_id)
         return render_id
+
+    async def create_render(
+        self,
+        clips: list[Clip],
+        video_format: str = "reels",
+        music_mood: str | None = None,
+        karaoke: bool = True,
+        quality: str = "prod",
+        broll_overlays: list[dict] | None = None,
+        webhook_url: str | None = None,
+        voiceover_url: str | None = None,
+        voiceover_duration: float = 0.0,
+        transition_types: list[str] | None = None,
+    ) -> str:
+        """
+        Legacy all-in-one render method. Kept for backward compatibility.
+
+        New code should use build_source() + apply_visual_blueprint() + submit_render().
+        """
+        source = self.build_source(
+            clips=clips,
+            video_format=video_format,
+            music_mood=music_mood,
+            karaoke=karaoke,
+            quality=quality,
+            voiceover_url=voiceover_url,
+            voiceover_duration=voiceover_duration,
+        )
+
+        # Legacy transition_types support (Gemini-based)
+        if transition_types:
+            video_els = [el for el in source["elements"] if el.get("type") == "video"]
+            for i, vel in enumerate(video_els):
+                if i > 0 and i < len(transition_types):
+                    t_type = transition_types[i]
+                    transition_base = TRANSITION_MAP.get(t_type)
+                    if transition_base:
+                        t_duration = round(max(0.4, min(0.8, clips[i].trim_duration * 0.07)), 2)
+                        vel["transition"] = {**transition_base, "duration": t_duration}
+
+        return await self.submit_render(source, webhook_url)
