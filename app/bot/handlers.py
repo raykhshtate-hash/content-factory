@@ -286,24 +286,34 @@ async def storyboard_render(
             [c.trim_duration for c in clips],
         )
 
-        # Audio compensation: transitions eat into timeline
+        # Audio compensation: voiceover may be longer than video timeline
         if transition_count > 0:
             from app.services.audio_processing import adjust_voiceover_for_transitions
 
-            total_overlap = transition_count * 0.5
-            new_vo_uri, new_vo_duration = await adjust_voiceover_for_transitions(
-                voiceover_gcs_uri=processed_uri,
-                overlap_seconds=total_overlap,
-                current_duration=processed_duration,
-            )
-            new_vo_url = await asyncio.to_thread(
-                gcs_service.generate_presigned_url, new_vo_uri
-            )
-            for el in source["elements"]:
-                if el.get("id") == "voiceover":
-                    el["source"] = new_vo_url
-                if el.get("transcript_source") == "voiceover":
-                    el["duration"] = new_vo_duration
+            total_clip_duration = sum(c.trim_duration for c in clips)
+            transition_overlap = transition_count * 0.5
+            video_timeline = total_clip_duration - transition_overlap
+            real_gap = processed_duration - video_timeline
+
+            if real_gap > 0.5:
+                new_vo_uri, new_vo_duration = await adjust_voiceover_for_transitions(
+                    voiceover_gcs_uri=processed_uri,
+                    overlap_seconds=real_gap,
+                    current_duration=processed_duration,
+                )
+                logger.info(
+                    f"Audio gap: voiceover={processed_duration:.1f}s, "
+                    f"video_timeline={video_timeline:.1f}s, "
+                    f"gap={real_gap:.1f}s"
+                )
+                new_vo_url = await asyncio.to_thread(
+                    gcs_service.generate_presigned_url, new_vo_uri
+                )
+                for el in source["elements"]:
+                    if el.get("id") == "voiceover":
+                        el["source"] = new_vo_url
+                    if el.get("transcript_source") == "voiceover":
+                        el["duration"] = new_vo_duration
 
         render_id = await creatomate.submit_render(source, webhook_url)
 
