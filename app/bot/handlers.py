@@ -702,17 +702,16 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
         return
 
     music_mood = None
+    clip_descriptions = None
     raw_analysis = item.get("analysis_result") or item.get("analysis_json")
     if raw_analysis:
         analysis_data = json.loads(raw_analysis) if isinstance(raw_analysis, str) else raw_analysis
         music_mood = analysis_data.get("suggested_music_mood")
-
-    # TODO: old broll pipeline, replaced by visual_director
-    # Keep code for potential Pexels/GIF future use
-    # script_text = item.get("script", "")
-    # broll_overlays = []
-    # if script_text and raw_analysis:
-    #     ...
+        candidates = analysis_data.get("clip_candidates", [])
+        if candidates:
+            descs = [c.get("visual_description", "") for c in candidates]
+            if any(descs):
+                clip_descriptions = descs
 
     # Visual Director: Claude picks transitions + sticker overlays
     from app.services.visual_director import get_visual_blueprint
@@ -728,6 +727,7 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
         scenario_text=script_text,
         clips=clips_info,
         render_mode="talking_head",
+        clip_descriptions=clip_descriptions,
     )
 
     logger.info(

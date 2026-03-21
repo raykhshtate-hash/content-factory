@@ -211,8 +211,8 @@ def apply_visual_blueprint(
         if sticker_time + sticker_duration > total_render_duration:
             continue
 
-        # Alternate position: even=right, odd=left
-        x = "75%" if sticker_idx % 2 == 0 else "25%"
+        # Position from Visual Director blueprint, with safe defaults
+        default_x = "75%" if sticker_idx % 2 == 0 else "25%"
 
         # Sticker track: 4 for both modes
         sticker_el = {
@@ -220,10 +220,10 @@ def apply_visual_blueprint(
             "track": 4,
             "time": sticker_time,
             "duration": sticker_duration,
-            "x": x,
-            "y": "18%",
-            "width": "25%",
-            "height": "25%",
+            "x": overlay.get("x", default_x),
+            "y": overlay.get("y", "60%"),
+            "width": overlay.get("width", "25%"),
+            "height": overlay.get("height", "25%"),
             "source": prompt,
             "provider": "openai model=gpt-image-1.5",
             "dynamic": True,

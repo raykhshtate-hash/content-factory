@@ -23,6 +23,14 @@ class ClipCandidate(BaseModel):
     end_time: str = Field(description="Время окончания клипа в формате MM:SS.s (с десятыми секунды), например 01:37.0. Включи запас 0.5с после конца фразы")
     reason: str = Field(description="Почему этот момент потенциально виральный")
     scene_label: str = Field(description="К какой сцене сценария относится этот клип: HOOK, STORY, PIVOT, CLOSING", default="")
+    clip_type: str = Field(
+        description="'speech' if clip contains spoken words (from audio map), 'broll' if silence/ambient only",
+        default="speech",
+    )
+    visual_description: str = Field(
+        default="",
+        description="Кратко что визуально в кадре: лицо спикера крупным планом, еда на столе, пейзаж города, руки делают процедуру — 5-10 слов",
+    )
 
 
 class StoryboardScene(BaseModel):
@@ -102,10 +110,14 @@ class GeminiService:
         gcs_uris: list[str] | str,
         prompt: str,
         model: str = "gemini-2.5-flash",
+        audio_map: list[dict] | None = None,
     ) -> Optional[VideoAnalysis]:
         """
         Analyze one or multiple videos directly from GCS via gs:// URIs.
         Returns structured VideoAnalysis or None on failure.
+
+        If audio_map is provided (from analyze_silence), Gemini receives
+        speech/silence segment data and assigns clip_type per clip.
         """
         if not self.client:
             print("❌ Gemini client not configured.")
@@ -113,6 +125,24 @@ class GeminiService:
 
         if isinstance(gcs_uris, str):
             gcs_uris = [gcs_uris]
+
+        # ── Inject audio map into prompt if provided ──
+        if audio_map:
+            import json
+            audio_map_json = json.dumps(audio_map, ensure_ascii=False, indent=2)
+            prompt += (
+                "\n\nАУДИО-КАРТА ВИДЕО (данные от Whisper):\n"
+                f"{audio_map_json}\n\n"
+                "ПРАВИЛА clip_type (ОБЯЗАТЕЛЬНЫ при наличии аудио-карты):\n"
+                "- Присваивай clip_type=\"speech\" ТОЛЬКО клипам, попадающим в интервалы "
+                "type=\"speech\" по аудио-карте.\n"
+                "- Интервалы type=\"silence\" можно использовать ТОЛЬКО как clip_type=\"broll\".\n"
+                "- Если на видео крупный план лица с артикуляцией губами, но по аудио-карте "
+                "это silence — КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО использовать как broll. "
+                "Пропусти этот сегмент.\n"
+                "- B-roll клипы должны быть визуально интересными: еда, пейзаж, детали, движение.\n"
+                "- Чередуй speech и broll для динамичного монтажа.\n"
+            )
 
         try:
             print(f"🧠 [Gemini] Analyzing {len(gcs_uris)} videos...")

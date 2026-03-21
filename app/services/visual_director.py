@@ -120,7 +120,88 @@ start_second и end_second — время на финальном таймлай
 "A passport with boarding pass, isolated object, sticker style, no background"
 "A small cosmetic jar, isolated object, sticker style, no background"
 
-Позицию и размер код определит сам.
+=== ПОЗИЦИЯ СТИКЕРОВ ===
+
+Для каждого стикера укажи x, y, width, height в процентах.
+
+ПРИОРИТЕТ КОНТЕКСТА: если доступны clip_descriptions \
+(что визуально в кадре каждого клипа) — ориентируйся на НИХ. \
+scenario_text может быть кратким и недостаточным.
+
+Правила:
+- clip_description содержит "лицо"/"спикер"/"говорит в камеру" → \
+лицо в зоне y: 15-50%. Стикер: y: 55-70%. НИКОГДА на лицо.
+- clip_description содержит "еда"/"пейзаж"/"детали"/"руки" (нет лица) → \
+стикер свободнее: y: 15-70%.
+- Нет clip_descriptions → ориентируйся на render_mode: \
+talking_head → предполагай лицо вверху, стикер y: 55-70%. \
+storyboard → свободнее, y: 15-70%.
+- Субтитры на y: 78%. Стикер не ниже y: 72%.
+- x: чередуй стороны.
+- Размер: width 15-25%, height 15-25%.
+- Несколько стикеров — разноси по экрану.
+
+=== КРЕАТИВНЫЕ ПРАВИЛА СТИКЕРОВ ===
+
+Стикер — это НЕ иллюстрация к кадру. Стикер визуализирует \
+ОЩУЩЕНИЕ зрителя от того что он видит.
+
+Принцип: посмотри на кадр глазами зрителя. Что он думает? \
+Что чувствует? Какая ассоциация возникает? ЭТО и рисуй. \
+Удиви — покажи реакцию зрителя, не содержание кадра. \
+Как будто зритель шлёт подруге стикер в чат со словами \
+"ну ты видела это?!"
+
+ЗАПРЕЩЕНО: рисовать то что уже в кадре или предмет из той же \
+категории. В кадре лапша — рисуешь стикер лапши? Зритель и так \
+её видит! Покажи то чего он НЕ видит но чувствует.
+
+Калибровочные примеры (уровень креативности который нужен):
+
+- Острая еда крупным планом, спикер реагирует → \
+"A tiny cartoon dragon breathing fire from its nostrils, \
+isolated object, sticker style, no background"
+
+- Аэропорт ранним утром, уставший спикер → \
+"A sleepy owl clutching a tiny coffee cup, \
+isolated object, sticker style, no background"
+
+- Красивый закат над городом → \
+"A vintage instant camera with a photo sliding out, \
+isolated object, sticker style, no background"
+
+- Результат косметической процедуры → \
+"A sparkling diamond with rainbow light reflections, \
+isolated object, sticker style, no background"
+
+- Долгая очередь в бюрократическом офисе → \
+"A tiny snail wearing round reading glasses, \
+isolated object, sticker style, no background"
+
+Заметь паттерн: дракон для остроты (а не перец!), \
+сова для усталости (а не подушка!), \
+улитка для медленности (а не часы!). \
+Стикер — это ХАРАКТЕР и МЕТАФОРА. Персонаж с настроением, \
+объект с неожиданной ассоциацией, предмет который рассказывает историю.
+
+Где уместно — добавляй юмор и абсурд. Смешной стикер запоминается. \
+Но не форсируй: красивый момент → красивый стикер (бриллиант, камера), \
+смешной момент → смешной стикер (улитка в очках, сова с кофе). \
+clean настроение → стикер сдержанный и элегантный. Никакого юмора \
+и абсурда. Примеры для clean: блеск звёздочек, кристалл, золотая \
+капля, жемчужина.
+
+Рисуй маленькие детальные объекты с характером. Не плоские иконки, \
+не эмодзи, не логотипы. Живые, тёплые, с personality.
+
+Промпт стикера ВСЕГДА заканчивается на \
+"isolated object, sticker style, no background".
+
+Если clip_description слишком общий ("женщина говорит", \
+"человек в кадре") — ориентируйся на scenario_text. \
+Если и scenario_text краткий — ориентируйся на mood: \
+dynamic = яркий и смешной, soft = тёплый и нежный, \
+clean = элегантный.
 
 === АНИМАЦИИ СТИКЕРОВ ===
 
@@ -204,7 +285,11 @@ Sticker overlays:
       "start_second": 5,
       "end_second": 14,
       "sticker_enter_animation": "wipe",
-      "sticker_exit_animation": "fade"
+      "sticker_exit_animation": "fade",
+      "x": "75%",
+      "y": "60%",
+      "width": "22%",
+      "height": "22%"
     }}
   ]
 }}
@@ -222,6 +307,17 @@ def _make_fallback(num_clips: int) -> dict:
         ],
         "overlays": [],
     }
+
+
+def _parse_pct(val: str | int | float, lo: int, hi: int, default: str) -> str:
+    """Parse '75%' → 75, clamp to [lo, hi], return as 'N%'. Fallback to default."""
+    try:
+        n = int(str(val).replace("%", "").strip())
+        if lo <= n <= hi:
+            return f"{n}%"
+    except (ValueError, TypeError):
+        pass
+    return default
 
 
 def _validate_blueprint(
@@ -263,27 +359,35 @@ def _validate_blueprint(
     clean_overlays = []
     used_ranges: list[tuple[int, int]] = []
 
-    for ov in raw_overlays:
+    for ov_i, ov in enumerate(raw_overlays):
         if not isinstance(ov, dict):
+            logger.debug("Overlay %d rejected: not a dict (%s)", ov_i, type(ov).__name__)
             continue
         if ov.get("type") != "ai_image":
+            logger.debug("Overlay %d rejected: type=%r (expected 'ai_image')", ov_i, ov.get("type"))
             continue
         prompt = ov.get("image_prompt", "")
         if not prompt:
+            logger.debug("Overlay %d rejected: empty image_prompt", ov_i)
             continue
         start = ov.get("start_second")
         end = ov.get("end_second")
         if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+            logger.debug("Overlay %d rejected: bad timing types start=%r end=%r", ov_i, start, end)
             continue
         start, end = int(start), int(end)
         # Rule: start < end, min 4s duration
         if end - start < 4:
+            logger.debug("Overlay %d rejected: duration %ds < 4s (start=%d end=%d)", ov_i, end - start, start, end)
             continue
-        # Rule: not in first/last 2s
-        if start < 2 or end > total_duration - 2:
+        # Rule: not in first/last safe zone (dynamic based on duration)
+        safe_margin = 1 if total_duration < 10 else 2
+        if start < safe_margin or end > total_duration - safe_margin:
+            logger.debug("Overlay %d rejected: out of safe zone (start=%d end=%d total=%.1f margin=%d)", ov_i, start, end, total_duration, safe_margin)
             continue
         # Rule: max 3 total
         if len(clean_overlays) >= MAX_STICKERS:
+            logger.debug("Overlay %d rejected: max stickers (%d) reached", ov_i, MAX_STICKERS)
             continue
         # Rule: no overlapping
         overlap = False
@@ -292,7 +396,9 @@ def _validate_blueprint(
                 overlap = True
                 break
         if overlap:
+            logger.debug("Overlay %d rejected: overlaps with existing range", ov_i)
             continue
+        logger.debug("Overlay %d accepted: prompt=%r start=%d end=%d", ov_i, prompt[:50], start, end)
 
         used_ranges.append((start, end))
         enter_anim = ov.get("sticker_enter_animation", "fade")
@@ -301,6 +407,14 @@ def _validate_blueprint(
             enter_anim = "fade"
         if exit_anim not in ALLOWED_STICKER_ANIMATIONS:
             exit_anim = "fade"
+        # Validate position fields
+        idx = len(clean_overlays)
+        default_x = "75%" if idx % 2 == 0 else "25%"
+        x_val = _parse_pct(ov.get("x", default_x), 10, 90, default_x)
+        y_val = _parse_pct(ov.get("y", "60%"), 10, 90, "60%")
+        w_val = _parse_pct(ov.get("width", "25%"), 10, 40, "25%")
+        h_val = _parse_pct(ov.get("height", "25%"), 10, 40, "25%")
+
         clean_overlays.append({
             "type": "ai_image",
             "image_prompt": prompt[:200],
@@ -308,6 +422,10 @@ def _validate_blueprint(
             "end_second": end,
             "sticker_enter_animation": enter_anim,
             "sticker_exit_animation": exit_anim,
+            "x": x_val,
+            "y": y_val,
+            "width": w_val,
+            "height": h_val,
         })
 
     return {
@@ -339,8 +457,8 @@ async def get_visual_blueprint(
 
     clip_durations = [c["duration"] for c in clips]
 
-    # Build clip descriptions block for storyboard mode
-    if clip_descriptions and render_mode == "storyboard":
+    # Build clip descriptions block (both modes)
+    if clip_descriptions:
         desc_lines = "\n".join(
             f"- Клип {i}: {desc}" for i, desc in enumerate(clip_descriptions)
         )
