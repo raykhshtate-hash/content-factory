@@ -1,187 +1,106 @@
-# Content Factory — Automated Content Pipeline for Romina
+# Content Factory — CLAUDE.md
 
 ## What is this
-Telegram bot that automates Instagram Reels creation for Romina (dermatologist, Germany).
-Pipeline: video upload → AI analysis → visual directing → render → delivery.
+Telegram bot: video upload → AI analysis → Visual Director → Creatomate render → delivery.
+Russian-language Instagram Reels for Romina (doctor-cosmetologist, Germany/Israel).
+
+**Repo:** `https://github.com/raykhshtate-hash/content-factory`
+**Branch:** `dev` (active) | `v0.1.5` on `main` (stable)
 
 ## Architecture
-- **Runtime**: Python 3.12, FastAPI, aiogram 3.x
-- **AI**: Claude Sonnet 4.6 (Visual Director), Gemini 2.5 Flash via Vertex AI (video analysis), Whisper (voice transcription only)
-- **Render**: Creatomate API (dynamic JSON source, NO templates)
-- **Infra**: Google Cloud Run (europe-west1), GCS, Supabase (PostgreSQL)
-- **Bot**: Telegram webhook in Cloud Run, polling in local dev
+Python 3.12, FastAPI, aiogram 3.x | Claude Sonnet 4.6 (Visual Director) | Gemini 2.5 Flash via Vertex AI | Creatomate (dynamic JSON, no templates) | GCS + Cloud Run (europe-west1) | Supabase (PostgreSQL)
+
+**GCP:** `romina-content-factory-489121` | Cloud Run: `content-factory` | URL: `https://content-factory-7ufgsc2feq-ew.a.run.app`
+**SA:** `content-factory-sa@romina-content-factory-489121.iam.gserviceaccount.com`
+**Drive:** INBOX `1ro3BwV7-u0wKq51PboVRMs2k1aeAs24L` | storyboard `1KLVCb6z-DisAhbtZf55nKACtJzF9Cw5P` | talking_head `1FXC2WR-E2MCFXMfXLy0uCOz0LLp6upLd`
 
 ## Key Files
-- `app/bot/handlers.py` — all bot logic, command handlers, render flow
-- `app/services/creatomate_service.py` — video render via JSON source
-- `app/services/gemini_service.py` — Vertex AI video analysis
-- `app/services/claude_service.py` — compliance check (DISABLED)
-- `app/services/visual_director.py` — Claude picks transitions + sticker overlays
-- `app/services/audio_processing.py` — voiceover silence removal + speedup (storyboard only)
-- `app/services/video_processing.py` — MOV→MP4 remux utility (reserved, not yet in pipeline)
-- `app/services/drive_service.py` — Google Drive folders → GCS transfer
-- `app/services/gcs_service.py` — GCS operations + presigned URLs
-- `app/services/whisper_service.py` — voice message transcription (NOT used for subtitles)
-- `app/services/timeline_utils.py` — B-roll timecode mapping (source → render timeline)
-- `app/webhooks/creatomate_webhook.py` — render completion → Telegram delivery
+- `handlers.py` — bot logic + render flow | `creatomate_service.py` — render JSON
+- `visual_director.py` — Claude picks transitions + stickers | `gemini_service.py` — video analysis
+- `audio_processing.py` — voiceover silence removal + speedup (storyboard only)
+- `drive_service.py` → `gcs_service.py` → presigned URLs | `creatomate_webhook.py` — delivery
 
-## Content Modes
-
-Two modes, determined by which Drive subfolder contains the files:
+## Two Modes
 
 ### talking_head (INBOX/talking_head/)
-One or more raw videos → Gemini analysis → clip selection → Visual Director → render.
-- Audio comes from video (speaker talking to camera)
-- Gemini analyzes all videos, selects best clips with timestamps
-- Visual Director adds transitions + sticker overlays (stickers always needed — same talking head gets boring)
-- Karaoke subtitles sync to each clip's audio via `transcript_source`
+Video has audio (speaker on camera). Gemini selects best clips with timestamps. Karaoke `transcript_source` = video element name (per-clip). Stickers always needed — same face gets boring. No audio processing.
 
 ### storyboard (INBOX/storyboard/)
-Pre-shot scene videos (sorted by filename) + separate voiceover audio file.
-- No Gemini analysis — scenes used as-is in filename order
-- Video audio muted, karaoke syncs to voiceover via `transcript_source: "voiceover"`
-- Voiceover processed: silence removal → speedup → re-speed for transition overlap
-- Visual Director adds transitions freely; stickers almost never (video already tells the story)
-- Gemini `visual_description` passed to Visual Director for storyboard context
+Numbered clips (01.mp4, 02.mp4...) + `voiceover.mp3`. Video `volume: "0%"`. Single karaoke on track 3 with `transcript_source: "voiceover"`. Audio element `id="voiceover"` on track 2. Voiceover processed: silence removal → dynamic speedup (capped 1.5x) → re-speed for transition overlap. Stickers almost never (max 1).
 
-## Critical Rules — NEVER violate these
+### Clip Pre-buffer
+**0.5s buffer before `trim_start`**: `adjusted_trim_start = max(0, trim_start - 0.5)`. Prevents cutting off phrase beginnings.
+
+### B-roll Timeline Mapping
+`render_time = render_start + (source_time - trim_start)` — Gemini timecodes are in source timeline, not rendered output.
+
+---
+
+## Quality Process
+See `~/.claude/CLAUDE.md` for full ДО → ВО ВРЕМЯ → ПОСЛЕ loop and `/reiterate` command.
+
+**Project-specific ДО rule:** Creatomate changes → READ `~/.claude/skills/creatomate/references/pitfalls.md` + `our-working-payload.md` FIRST. New effects → READ `all-animations.md` + verify against official docs.
+
+---
+
+## Critical Rules — NEVER violate
 
 ### Cloud Run
-- **NEVER use `asyncio.create_task()`** — Cloud Run kills CPU after response. Use `await` directly or FastAPI `BackgroundTasks`.
-- Webhook handler (`/webhook`) uses `background_tasks.add_task(dp.feed_update, ...)` — this is correct, don't change.
-- All long operations (Gemini analysis, render) run inside this BackgroundTask chain.
+- **NEVER `asyncio.create_task()`** — use `BackgroundTasks` (FastAPI). Cloud Run kills orphaned tasks.
+- Webhook uses `background_tasks.add_task(dp.feed_update, ...)` — don't change.
 
 ### Supabase
-- **Use `model_dump()` for JSONB columns**, NOT `model_dump_json()` — the latter produces a string, causing silent failures.
-- `analysis_result` column stores Gemini output as JSONB dict.
+- **`model_dump()` for JSONB**, NOT `model_dump_json()` (string vs dict — silent failure).
 
-### GCS & URLs
-- **Always use presigned URLs** for Creatomate — GCS bucket is NOT public.
-- `gcs_service.generate_presigned_url()` creates V4 signed URLs (6 hour expiry).
-- Cache signed URLs per unique `gs://` URI to avoid re-signing the same file.
-
-### Creatomate
-- We use **dynamic JSON source** (not templates). All render logic is in `creatomate_service.py`.
-- **BEFORE making ANY changes** to `creatomate_service.py` or any code that builds Creatomate JSON:
-  1. READ `~/.claude/skills/creatomate/references/pitfalls.md`
-  2. READ `~/.claude/skills/creatomate/references/our-working-payload.md`
-  3. If adding NEW Creatomate features (transitions, effects, new element types) — READ `~/.claude/skills/creatomate/references/all-animations.md` for correct JSON format AND verify against Creatomate documentation. **NEVER guess the format.**
-- Flat timeline: each video clip is named `clip-{i}`, each gets its own karaoke text element with `transcript_source`.
-- `transcript_effect: "karaoke"` = native Creatomate word-by-word subs. NO Whisper needed for subtitles.
-- **Dev/Prod quality**: `quality="dev"` = 720×1280 @24fps, `quality="prod"` = 1080×1920 @60fps.
-- **Image elements — use minimal fields**: extra properties (scale animations, shadow, background_color, background_padding) silently break image elements without errors.
-- **`border_radius` must be a number** (50), not a string ("50").
-- **AI image providers**: only `openai`, `elevenlabs`, `stabilityai` — no Google/Gemini/Nano Banana.
-- **Fade animations are safe on image elements**, scale animations are NOT.
-- **Storyboard mode**: `voiceover_url` param in `create_render()`. Adds audio element `id="voiceover"` on track 2, single karaoke on track 3 with `transcript_source: "voiceover"`. Video elements get `volume: "0%"`.
-
-### Gemini
-- Model: `gemini-2.5-flash` via Vertex AI (NOT Google AI Studio, NOT Gemini 1.5).
-- Videos passed as `gs://` URIs directly — no download needed.
-- `video_index` in schema is REQUIRED to map clips to correct source video.
-- Structured output via `response_schema=VideoAnalysis` — guarantees valid JSON.
-- **Prompt is sensitive**: any new instructions change clip selection even for unrelated fields. Test prompt changes separately.
-
-### Photos
-- **Do NOT filter out photos permanently** from the Drive→GCS pipeline. They're needed for future posts/carousels.
-- Current filter is video-only for Gemini analysis, but photos are preserved in GCS.
+### GCS
+- **Always presigned URLs** for Creatomate (bucket not public). 6hr expiry, 360min minimum.
+- Cache signed URLs per `gs://` URI.
 
 ### Telegram
-- `allowed_updates` must include `callback_query` in `setWebhook` (set in `deploy.sh`).
-- Always respond 200 OK immediately to Telegram webhooks to prevent duplicate deliveries.
+- `allowed_updates` must include `callback_query` in webhook.
+- Idempotency: set "rendering" + remove keyboard on first callback click.
 
-## Visual Director
+### Creatomate
+- **ALWAYS read pitfalls.md + our-working-payload.md before ANY change.**
+- `animations[]` array for transitions — never property keyframes (breaks transcript_source).
+- Ken Burns (scale, scope: element) — REMOVED, causes darkening.
+- `border_radius`: number (50), not string ("50%").
+- `"transition": true` in animations[] — separate `"transition"` property doesn't work.
+- Image elements: minimal fields only — extras silently break without errors.
+- Fade animations safe on images, scale animations NOT.
+- Exit animation: MUST have `"reversed": true`.
+- Same source URL can't have multiple `transcript_source` — use `transcribed_sources` set.
+- Storyboard: omit explicit `duration` when voiceover present.
+- AI providers: only `openai`, `elevenlabs`, `stabilityai`.
 
-- **`app/services/visual_director.py`** — Claude Sonnet 4.6, temperature=0, JSON-only API
-- Single Claude call → `visual_blueprint` dict with transitions + overlays
-- Blueprint applied via `apply_visual_blueprint()` in `creatomate_service.py`
-- **Architecture**: `build_source()` → `apply_visual_blueprint()` → `submit_render()`
-- **Response parsing**: strips markdown fences (```` ```json ````) + extracts first `{` to last `}`
-- **Fallback**: any error → all hard cuts, no stickers ("clean" mode)
+### Gemini
+- `temperature=0` for deterministic results. Prompt is sensitive — test changes separately.
+- `video_index` REQUIRED in schema.
 
-### Mood Modes
-- **clean**: hard cuts only, max 1 sticker. For serious/medical/sad content.
-- **soft**: fade/wipe transitions + 1-2 stickers. For personal/emotional content.
-- **dynamic**: varied transitions + 2-3 stickers. For lifestyle/tips/motivation.
-- **mixed**: different styles for different parts (hook=dynamic, story=soft, closing=clean).
+---
 
-### Transitions
-- Format: `animations[]` with `"transition": true`, duration 0.5s fixed
-- Allowed: fade, slide, wipe, circular-wipe, color-wipe, film-roll, squash, rotate-slide, shift
-- **Forbidden**: scale (rendering artifacts), spin, flip (off-brand)
-- Direction types (slide, film-roll, squash, rotate-slide, shift, color-wipe): need `direction` field
-- Clip index 0 always has `transition: null`
-- Clips < 2.5s → no transition; talking_head clips < 3s → no transition
+## Visual Director (compact)
+Claude Sonnet 4.6, temperature=0, JSON-only API. Fallback on error: clean mode.
+Modes: clean (hard cuts) | soft (fade/wipe) | dynamic (varied) | mixed (per-section).
+Transitions: `animations[]` with `"transition": true`, 0.5s. Forbidden: scale, spin, flip.
+Stickers: timeline-based, provider `openai model=gpt-image-1.5`, `dynamic: true`, `reversed: true` on exit.
 
-### Sticker Overlays
-- **Timeline-based**: `start_second` / `end_second` on final reel timeline (not per-clip)
-- Provider: `openai model=gpt-image-1.5` via Creatomate `dynamic: true`
-- Exit animation requires `"reversed": true` (see pitfalls.md)
-- **talking_head**: max 3 stickers, always needed for visual variety
-- **storyboard**: max 1 sticker, almost never needed (only for exotic mismatch between speech and video)
-- Rules: not in first/last 2s, min 4s duration, no overlap, prompt ends with "isolated object, sticker style, no background"
-- Position alternates x: 25%/75%
-
-## Audio Processing (storyboard only)
-
-- **`app/services/audio_processing.py`** — ffmpeg-based pipeline
-- `process_voiceover()`: silence removal (>1s gaps) → speedup to 70% of video duration (min 1.2x, max 1.5x)
-- `adjust_voiceover_for_transitions()`: re-speed to compensate transition overlap
-- **Guard**: max 1.3x additional speedup for transition compensation — beyond that, skip adjustment
-- Downloads via `requests` (ffmpeg can't handle GCS presigned URLs with special chars)
-
-## Clip Pre-buffer
-
-- **0.5s buffer before `trim_start`** of each clip: `adjusted_trim_start = max(0, trim_start - 0.5)`
-- Prevents cutting off the beginning of speaker phrases
-- `adjusted_duration = trim_duration + buffer` — video, karaoke, and timeline advance use adjusted values
-
-## Gemini scene_label
-
-- Field `scene_label` added to `ClipCandidate` schema (optional)
-- **Sorting by `scene_label` DISABLED** — changed Gemini clip selection behavior
-- **Instructions in Gemini prompt DISABLED** (commented out in `handlers.py` ~200)
-- Approach needs rethinking — not via Gemini prompt, but via post-processing
-
-## Disabled Features
-
-- **Ken Burns**: scale animations caused video darkening. No scene animations on clips.
-- **Compliance check** (`claude_service.py`): commented out in `creatomate_webhook.py:80-86`. Caption shows clean "Твое видео готово!" without compliance warnings.
-- **Script generation** (`generate_script`): disabled, pipeline uses passthrough (user's script text as-is).
-- **Old broll pipeline** (`_build_broll_elements`, `generate_broll_prompts`): commented out in `creatomate_service.py`, replaced by Visual Director sticker overlays.
-
-## Known Bugs
-
-- **Drive delete 403**: after transferring files to GCS, `drive_service.py` tries to delete originals but gets 403 (insufficient permissions). Files stay in Drive. Non-blocking — pipeline continues.
-
-## On the Horizon
-
-- **Enhance mode**: Whisper word-level timestamps → smart cuts (remove filler words, pauses)
-- Visual effects (text overlays, lower thirds)
-- GIF/animated stickers
-- Background music layer
-- Multiple render variants (A/B testing different styles)
+---
 
 ## Development Workflow
-- **Diagnose before fixing** — always identify root cause first, don't just try random fixes.
-- **One change at a time** — deploy and test each change separately.
-- Check Cloud Run logs: `gcloud run services logs read content-factory --region europe-west1 --limit 50`
-- Local dev: `python -m app.main` (auto-detects local mode via missing `K_SERVICE` env var).
 
-## Deploy
-```bash
-sh scripts/deploy.sh
-```
+### Sandwich Pattern
+- **Antigravity (Planning + Gemini Pro 3.1 High):** Architecture only, never code. Russian, specify mode + model.
+- **Claude Code (Sonnet):** Simple tasks. **(Opus 4.6 thinking):** Complex multi-file.
+- **Sonnet-чат (claude.ai):** Execution questions after architecture settled.
 
-## GCP Details
-- Project: `romina-content-factory-489121`
-- Region: `europe-west1`
-- Cloud Run URL: `https://content-factory-7ufgsc2feq-ew.a.run.app`
-- GCS Bucket: configured via `GCS_BUCKET` env var
-- Drive Talking Head Folder: configured via `DRIVE_TALKING_HEAD_FOLDER_ID` env var
-- Drive Storyboard Folder: configured via `DRIVE_STORYBOARD_FOLDER_ID` env var
+### Local: `python -m app.main` (auto-polling when `K_SERVICE` absent). Use `python3`.
+### Deploy: `./scripts/deploy.sh` | Merge: `./scripts/merge.sh`
+### Logs: `gcloud run services logs read content-factory --region europe-west1 --limit 50`
+### Git: `main` (protected, deployable) + `dev`. Commits/merges/deploys in Antigravity terminal only.
 
 ## Do NOT Refactor
-- handlers.py callback flow — tested, complex state machine
-- deploy.sh webhook setup — includes allowed_updates
-- Presigned URL caching in gcs_service
+- `handlers.py` callback flow | `deploy.sh` webhook setup | presigned URL caching in gcs_service
+
+## Disabled Features
+Ken Burns | Compliance check | Script generation | Old B-roll pipeline (Pexels)
