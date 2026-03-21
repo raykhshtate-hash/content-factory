@@ -11,6 +11,108 @@ from tenacity import retry, retry_if_exception_type, wait_exponential, stop_afte
 
 logger = logging.getLogger(__name__)
 
+# ── Silence Map Generator (Step 1 of Hybrid Mode) ──────────────────
+
+FILLER_WORDS = {"э", "эм", "ум"}
+
+
+def analyze_silence(
+    word_timestamps: list[dict],
+    gap_threshold: float = 1.0,
+    min_speech_duration: float = 0.8,
+    filler_gap_threshold: float = 1.0,
+) -> list[dict]:
+    """
+    Build a silence map from Whisper word-level timestamps.
+
+    Input:  [{"word": "привет", "start": 0.5, "end": 0.9}, ...]
+    Output: sorted list of {"type": "speech"|"silence", "start", "end", "words"?}
+    """
+    if not word_timestamps:
+        return []
+
+    # ── Step 1: Group words into raw speech blocks ──
+    blocks: list[list[dict]] = []
+    current: list[dict] = [word_timestamps[0]]
+
+    for w in word_timestamps[1:]:
+        prev_end = current[-1]["end"]
+        if w["start"] - prev_end > gap_threshold:
+            blocks.append(current)
+            current = [w]
+        else:
+            current.append(w)
+    blocks.append(current)
+
+    # ── Step 2: Min duration filter ──
+    blocks = [
+        b for b in blocks
+        if b[-1]["end"] - b[0]["start"] >= min_speech_duration
+    ]
+
+    # ── Step 3: Filler filter on single-word blocks ──
+    filtered: list[list[dict]] = []
+    for i, b in enumerate(blocks):
+        if len(b) == 1 and b[0]["word"].strip().lower() in FILLER_WORDS:
+            # Check gaps to previous and next remaining speech blocks
+            prev_end = filtered[-1][-1]["end"] if filtered else None
+            next_start = None
+            for j in range(i + 1, len(blocks)):
+                # Skip future single-word fillers that might also be removed —
+                # conservative: check against all remaining blocks.
+                next_start = blocks[j][0]["start"]
+                break
+
+            gap_before = (b[0]["start"] - prev_end) if prev_end is not None else float("inf")
+            gap_after = (next_start - b[0]["end"]) if next_start is not None else float("inf")
+
+            if gap_before > filler_gap_threshold and gap_after > filler_gap_threshold:
+                continue  # drop isolated filler
+        filtered.append(b)
+    blocks = filtered
+
+    if not blocks:
+        return []
+
+    # ── Step 4: Safety margin (+0.2s, capped by next word in original) ──
+    # Build lookup: for each word end time, find next word's start
+    next_word_start: dict[float, float] = {}
+    for idx in range(len(word_timestamps) - 1):
+        next_word_start[word_timestamps[idx]["end"]] = word_timestamps[idx + 1]["start"]
+
+    for b in blocks:
+        last_end = b[-1]["end"]
+        cap = next_word_start.get(last_end)
+        margin = last_end + 0.2
+        if cap is not None:
+            b[-1] = {**b[-1], "end": min(margin, cap)}
+        else:
+            b[-1] = {**b[-1], "end": margin}
+
+    # ── Step 5: Assemble speech + silence segments ──
+    segments: list[dict] = []
+    first_start = blocks[0][0]["start"]
+
+    # Leading silence
+    if first_start > 0:
+        segments.append({"type": "silence", "start": 0, "end": first_start})
+
+    for i, b in enumerate(blocks):
+        segments.append({
+            "type": "speech",
+            "start": b[0]["start"],
+            "end": b[-1]["end"],
+            "words": b,
+        })
+        # Gap to next block → silence
+        if i + 1 < len(blocks):
+            gap_start = b[-1]["end"]
+            gap_end = blocks[i + 1][0]["start"]
+            if gap_end > gap_start:
+                segments.append({"type": "silence", "start": gap_start, "end": gap_end})
+
+    return segments
+
 
 class WhisperService:
     def __init__(self, api_key: str):
