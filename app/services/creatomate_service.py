@@ -116,6 +116,29 @@ TRANSITION_MAP = {
     "circular-wipe": {"type": "circular-wipe"},
 }
 
+# ── Sticker animation presets (image-safe, no scale/spin) ────────
+STICKER_ANIM_PRESETS = {
+    "fade": {"type": "fade", "duration": 0.3},
+    "wipe": {"type": "wipe", "duration": 0.4},
+    "slide": {"type": "slide", "duration": 0.4, "direction": "up", "fade": True},
+    "flip": {"type": "flip", "duration": 0.5, "x_rotation": "-180°", "y_rotation": "0°"},
+    "bounce": {"type": "bounce", "duration": 0.5, "axis": "y"},
+    "circular-wipe": {"type": "circular-wipe", "duration": 0.5},
+    "film-roll": {"type": "film-roll", "duration": 0.4, "direction": "up"},
+    "shift": {"type": "shift", "duration": 0.4, "direction": "up"},
+    "squash": {"type": "squash", "duration": 0.4, "direction": "down", "fade": True},
+    "rotate-slide": {"type": "rotate-slide", "duration": 0.5, "direction": "right", "clockwise": True},
+}
+
+
+def _build_sticker_anim(anim_type: str, is_exit: bool) -> dict:
+    """Build a sticker enter/exit animation dict from a type name."""
+    base = STICKER_ANIM_PRESETS.get(anim_type, STICKER_ANIM_PRESETS["fade"])
+    anim = {**base, "time": "end" if is_exit else 0}
+    if is_exit:
+        anim["reversed"] = True
+    return anim
+
 
 def apply_visual_blueprint(
     elements: list[dict],
@@ -207,8 +230,8 @@ def apply_visual_blueprint(
             "border_radius": 50,
             "opacity": "85%",
             "animations": [
-                {"time": 0, "duration": 0.3, "type": "fade"},
-                {"time": "end", "duration": 0.3, "type": "fade", "reversed": True},
+                _build_sticker_anim(overlay.get("sticker_enter_animation", "fade"), is_exit=False),
+                _build_sticker_anim(overlay.get("sticker_exit_animation", "fade"), is_exit=True),
             ],
         }
         elements.append(sticker_el)

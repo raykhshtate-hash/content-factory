@@ -30,6 +30,11 @@ ALLOWED_DIRECTIONS = {"left", "right", "up", "down"}
 
 MAX_STICKERS = 3
 
+ALLOWED_STICKER_ANIMATIONS = {
+    "fade", "wipe", "slide", "flip", "bounce",
+    "circular-wipe", "film-roll", "shift", "squash", "rotate-slide",
+}
+
 SYSTEM_PROMPT = """\
 You are a JSON-only API. Respond with a single JSON object. No text before or after. No analysis, no markdown, no explanation. First character of your response must be {{
 
@@ -115,7 +120,34 @@ start_second и end_second — время на финальном таймлай
 "A passport with boarding pass, isolated object, sticker style, no background"
 "A small cosmetic jar, isolated object, sticker style, no background"
 
-Позицию, размер, анимацию код определит сам.
+Позицию и размер код определит сам.
+
+=== АНИМАЦИИ СТИКЕРОВ ===
+
+Для каждого стикера выбери тип анимации появления и исчезновения.
+
+Доступные типы:
+- fade: плавное появление/исчезновение (самый мягкий)
+- wipe: шторка (мягкий, элегантный)
+- slide: выезд снизу (плавный, направленный)
+- flip: переворот 3D (яркий, эффектный)
+- bounce: подпрыгивание (весёлый, энергичный)
+- circular-wipe: круговая шторка (эффектный reveal)
+- film-roll: плёночный ролл (ретро, стильный)
+- shift: графичный сдвиг (резкий, современный)
+- squash: сжатие-растяжение (мультяшный, динамичный)
+- rotate-slide: поворот со сдвигом (сложный, впечатляющий)
+
+Гайд по mood:
+- clean: ТОЛЬКО fade
+- soft: fade, wipe, slide
+- dynamic: ВСЕ типы — чем разнообразнее тем лучше. \
+Не повторяй одну и ту же анимацию дважды!
+- mixed: по секциям — спокойные секции = soft палитра, \
+энергичные секции = dynamic палитра
+
+Enter и exit МОГУТ быть разными типами (например flip enter + fade exit). \
+Если несколько стикеров — используй разные комбинации для каждого!
 
 === РЕЖИМЫ НАСТРОЕНИЯ ===
 
@@ -170,7 +202,9 @@ Sticker overlays:
       "type": "ai_image",
       "image_prompt": "A skincare serum bottle, isolated object, sticker style, no background",
       "start_second": 5,
-      "end_second": 14
+      "end_second": 14,
+      "sticker_enter_animation": "wipe",
+      "sticker_exit_animation": "fade"
     }}
   ]
 }}
@@ -261,11 +295,19 @@ def _validate_blueprint(
             continue
 
         used_ranges.append((start, end))
+        enter_anim = ov.get("sticker_enter_animation", "fade")
+        exit_anim = ov.get("sticker_exit_animation", "fade")
+        if enter_anim not in ALLOWED_STICKER_ANIMATIONS:
+            enter_anim = "fade"
+        if exit_anim not in ALLOWED_STICKER_ANIMATIONS:
+            exit_anim = "fade"
         clean_overlays.append({
             "type": "ai_image",
             "image_prompt": prompt[:200],
             "start_second": start,
             "end_second": end,
+            "sticker_enter_animation": enter_anim,
+            "sticker_exit_animation": exit_anim,
         })
 
     return {
