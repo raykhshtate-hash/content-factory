@@ -410,7 +410,7 @@ def _validate_blueprint(
         # Validate position fields
         idx = len(clean_overlays)
         default_x = "75%" if idx % 2 == 0 else "25%"
-        x_val = _parse_pct(ov.get("x", default_x), 10, 90, default_x)
+        x_val = _parse_pct(ov.get("x", default_x), 15, 85, default_x)
         y_val = _parse_pct(ov.get("y", "60%"), 10, 90, "60%")
         w_val = _parse_pct(ov.get("width", "25%"), 10, 40, "25%")
         h_val = _parse_pct(ov.get("height", "25%"), 10, 40, "25%")

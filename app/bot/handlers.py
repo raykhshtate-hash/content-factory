@@ -3,7 +3,7 @@ from aiogram.filters import Command
 
 from app.config import settings
 from app.services.claude_service import ClaudeService
-from app.services.whisper_service import WhisperService
+from app.services.whisper_service import WhisperService, analyze_silence
 from app.services import supabase_service
 from app.bot import messages
 
@@ -582,9 +582,45 @@ async def analyze_and_propose(chat_id: int, item_id: str, gcs_uris: list[str], s
             await supabase_service.update_item(item_id, status="analysis_failed")
             return
 
-    # ПРОБЛЕМА 2 ИСПРАВЛЕНА: Передаем весь список video_uris
+    # ── Whisper audio analysis for clip_type ──
+    audio_map = None
+    try:
+        gcs_service = GCSService()
+
+        async def _sign(uri):
+            return await asyncio.to_thread(gcs_service.generate_presigned_url, uri)
+
+        signed_urls = await asyncio.gather(*[_sign(u) for u in video_uris])
+
+        async def _transcribe_one(url):
+            words = await whisper.transcribe_url_with_timestamps(url)
+            return analyze_silence(words) if words else []
+
+        results = await asyncio.gather(
+            *[_transcribe_one(u) for u in signed_urls],
+            return_exceptions=True,
+        )
+
+        map_entries = []
+        for i, res in enumerate(results):
+            if isinstance(res, Exception):
+                logger.warning("Whisper failed for video %d: %s", i + 1, res)
+                continue
+            if res:
+                map_entries.append({"video_index": i + 1, "segments": res})
+
+        if map_entries:
+            audio_map = map_entries
+            logger.info("Audio map ready: %d/%d videos transcribed", len(map_entries), len(video_uris))
+        else:
+            logger.warning("All Whisper transcriptions empty/failed — proceeding without audio_map")
+
+    except Exception as e:
+        logger.error("Whisper pipeline error: %s — proceeding without audio_map", e)
+        audio_map = None
+
     gemini = GeminiService()
-    analysis = await gemini.analyze_video(video_uris, prompt)
+    analysis = await gemini.analyze_video(video_uris, prompt, audio_map=audio_map)
     
     if not analysis:
         # Fallback Mode
@@ -723,6 +759,7 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
         for i, clip in enumerate(clips)
     ]
 
+    logger.debug("clip_descriptions for Visual Director: %s", clip_descriptions)
     blueprint = await get_visual_blueprint(
         scenario_text=script_text,
         clips=clips_info,
