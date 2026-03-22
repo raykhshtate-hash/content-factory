@@ -28,6 +28,8 @@ class Clip:
     source: str       # signed video URL
     trim_start: float # seconds
     trim_duration: float
+    clip_type: str = "speech"     # "speech" or "broll"
+    video_index: int = 1          # 1-based, for whisper_words lookup
 
 
 # ── Quality presets ─────────────────────────────────────────────
@@ -138,6 +140,34 @@ def _build_sticker_anim(anim_type: str, is_exit: bool) -> dict:
     if is_exit:
         anim["reversed"] = True
     return anim
+
+
+def _group_whisper_phrases(words: list[dict], max_chars: int = 15) -> list[dict]:
+    """Group Whisper words into display phrases of ≤max_chars."""
+    phrases: list[dict] = []
+    current_words: list[dict] = []
+    current_len = 0
+    for w in words:
+        text = w["word"].strip()
+        new_len = current_len + len(text) + (1 if current_words else 0)
+        if new_len > max_chars and current_words:
+            phrases.append({
+                "text": " ".join(cw["word"].strip() for cw in current_words),
+                "start": current_words[0]["start"],
+                "end": current_words[-1]["end"],
+            })
+            current_words = [w]
+            current_len = len(text)
+        else:
+            current_words.append(w)
+            current_len = new_len
+    if current_words:
+        phrases.append({
+            "text": " ".join(cw["word"].strip() for cw in current_words),
+            "start": current_words[0]["start"],
+            "end": current_words[-1]["end"],
+        })
+    return phrases
 
 
 def apply_visual_blueprint(
@@ -291,6 +321,7 @@ class CreatomateService:
         quality: str = "prod",
         voiceover_url: str | None = None,
         voiceover_duration: float = 0.0,
+        whisper_words: dict[str, list[dict]] | None = None,
     ) -> dict:
         """
         Build Creatomate source JSON (elements + metadata).
@@ -319,6 +350,16 @@ class CreatomateService:
         mood_key = (music_mood or "professional").lower() if karaoke else None
         style = KARAOKE_STYLES.get(mood_key, KARAOKE_STYLES["professional"]) if karaoke else {}
 
+        # Decide: Whisper popup subtitles vs transcript_source fallback
+        use_whisper_karaoke = (
+            whisper_words is not None
+            and not voiceover_url
+            and any(
+                str(clip.video_index) in whisper_words
+                for clip in clips if clip.clip_type != "broll"
+            )
+        )
+
         for i, clip in enumerate(clips):
             clip_name = f"clip-{i}"
 
@@ -340,31 +381,93 @@ class CreatomateService:
 
             if voiceover_url:
                 video_el["volume"] = "0%"
+            elif clip.clip_type == "broll":
+                video_el["volume"] = "70%"
 
             elements.append(video_el)
 
-            if karaoke and not voiceover_url:
-                karaoke_el = {
-                    "type": "text",
-                    "track": 2,
-                    "transcript_source": clip_name,
-                    "transcript_effect": "karaoke",
-                    "transcript_maximum_length": 15,
-                    "duration": adjusted_duration,
-                    "width": "90%",
-                    "height": "20%",
-                    "x": "50%",
-                    "y": "78%",
-                    "x_alignment": "50%",
-                    "y_alignment": "50%",
-                    "font_family": "Montserrat",
-                    "font_weight": "700",
-                    "font_size": "6 vmin",
-                    "stroke_color": "#000000",
-                    "stroke_width": "1.6 vmin",
-                }
-                karaoke_el.update(style)
-                karaoke_elements.append(karaoke_el)
+            if karaoke and not voiceover_url and clip.clip_type != "broll":
+                if use_whisper_karaoke:
+                    # ── Whisper popup subtitles ──
+                    raw_words = whisper_words.get(str(clip.video_index), [])
+                    trim_end = clip.trim_start + clip.trim_duration
+                    clip_words = [
+                        w for w in raw_words
+                        if w["start"] >= clip.trim_start and w["start"] < trim_end
+                    ]
+                    clip_words = [
+                        {**w, "end": min(w["end"], trim_end)} for w in clip_words
+                    ]
+
+                    if clip_words:
+                        phrases = _group_whisper_phrases(clip_words)
+                        clip_end_time = current_time + adjusted_duration
+
+                        for p_i, phrase in enumerate(phrases):
+                            phrase_time = current_time + (phrase["start"] - adjusted_trim_start)
+
+                            # Skip phrases beyond clip end (prevents subtitles on black screen)
+                            if phrase_time >= clip_end_time:
+                                continue
+
+                            if p_i + 1 < len(phrases):
+                                next_time = current_time + (phrases[p_i + 1]["start"] - adjusted_trim_start)
+                                phrase_dur = next_time - phrase_time
+                            else:
+                                phrase_dur = max(0.3, clip_end_time - phrase_time)
+
+                            text_el = {
+                                "type": "text",
+                                "track": 2,
+                                "time": round(phrase_time, 3),
+                                "duration": round(phrase_dur, 3),
+                                "text": phrase["text"],
+                                "width": "90%",
+                                "height": "20%",
+                                "x": "50%",
+                                "y": "78%",
+                                "x_alignment": "50%",
+                                "y_alignment": "50%",
+                                "font_family": "Montserrat",
+                                "font_weight": "700",
+                                "font_size": "6 vmin",
+                                "stroke_color": "#000000",
+                                "stroke_width": "1.6 vmin",
+                            }
+                            text_el.update(style)
+                            # transcript_color is for native karaoke only; use it as fill_color for popup text
+                            if "transcript_color" in text_el:
+                                text_el["fill_color"] = text_el.pop("transcript_color")
+                            logger.debug(
+                                "Popup phrase: text=%r time=%.3f dur=%.3f | clip_trim=%.2f adj_trim=%.2f cur_time=%.2f phrase_start=%.2f clip_end=%.2f",
+                                phrase["text"][:20], phrase_time, phrase_dur,
+                                clip.trim_start, adjusted_trim_start, current_time, phrase["start"], clip_end_time,
+                            )
+                            karaoke_elements.append(text_el)
+                    # No words for this video → no subtitles (better than garbage)
+                else:
+                    # ── Fallback: transcript_source (all Whisper failed) ──
+                    karaoke_el = {
+                        "type": "text",
+                        "track": 2,
+                        "transcript_source": clip_name,
+                        "transcript_effect": "karaoke",
+                        "transcript_maximum_length": 15,
+                        "duration": adjusted_duration,
+                        "width": "90%",
+                        "height": "20%",
+                        "x": "50%",
+                        "y": "78%",
+                        "x_alignment": "50%",
+                        "y_alignment": "50%",
+                        "font_family": "Montserrat",
+                        "font_weight": "700",
+                        "font_size": "6 vmin",
+                        "stroke_color": "#000000",
+                        "stroke_width": "1.6 vmin",
+                    }
+                    karaoke_el.update(style)
+                    karaoke_elements.append(karaoke_el)
 
             current_time += adjusted_duration
 

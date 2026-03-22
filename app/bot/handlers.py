@@ -594,20 +594,26 @@ async def analyze_and_propose(chat_id: int, item_id: str, gcs_uris: list[str], s
 
         async def _transcribe_one(url):
             words = await whisper.transcribe_url_with_timestamps(url)
-            return analyze_silence(words) if words else []
+            segments = analyze_silence(words) if words else []
+            return {"words": words, "segments": segments}
 
         results = await asyncio.gather(
             *[_transcribe_one(u) for u in signed_urls],
             return_exceptions=True,
         )
 
+        whisper_words = {}  # {video_index_str: [{word, start, end}]}
         map_entries = []
         for i, res in enumerate(results):
             if isinstance(res, Exception):
                 logger.warning("Whisper failed for video %d: %s", i + 1, res)
                 continue
-            if res:
-                map_entries.append({"video_index": i + 1, "segments": res})
+            segments = res.get("segments", []) if isinstance(res, dict) else res
+            words = res.get("words", []) if isinstance(res, dict) else []
+            if segments:
+                map_entries.append({"video_index": i + 1, "segments": segments})
+            if words:
+                whisper_words[str(i + 1)] = words
 
         if map_entries:
             audio_map = map_entries
@@ -618,6 +624,7 @@ async def analyze_and_propose(chat_id: int, item_id: str, gcs_uris: list[str], s
     except Exception as e:
         logger.error("Whisper pipeline error: %s — proceeding without audio_map", e)
         audio_map = None
+        whisper_words = {}
 
     gemini = GeminiService()
     analysis = await gemini.analyze_video(video_uris, prompt, audio_map=audio_map)
@@ -644,10 +651,13 @@ async def analyze_and_propose(chat_id: int, item_id: str, gcs_uris: list[str], s
     await update_progress(status_msg, 3, "Формирую результаты...")
     
     try:
+        result_data = analysis.model_dump()
+        if whisper_words:
+            result_data["whisper_words"] = whisper_words
         await supabase_service.update_item(
-            item_id, 
+            item_id,
             status="ready_for_render",
-            analysis_result=analysis.model_dump() # Сохраняем как словарь (Supabase автоматически конвертирует в JSON)
+            analysis_result=result_data,
         )
     except Exception as e:
         print(f"⚠️ Ошибка при сохранении в БД: {e}")
@@ -721,7 +731,14 @@ async def _candidates_to_clips(candidates, gcs_uris: list[str], gcs_service: GCS
                 gcs_service.generate_presigned_url, gcs_uri
             )
         signed_url = _signed_cache[gcs_uri]
-        clips.append(Clip(source=signed_url, trim_start=start, trim_duration=end - start))
+        clip_type = c.get("clip_type", "speech") if isinstance(c, dict) else getattr(c, "clip_type", "speech")
+        clips.append(Clip(
+            source=signed_url,
+            trim_start=start,
+            trim_duration=end - start,
+            clip_type=clip_type,
+            video_index=v_idx + 1,
+        ))
     return clips
 
 
@@ -739,10 +756,12 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
 
     music_mood = None
     clip_descriptions = None
+    whisper_words = None
     raw_analysis = item.get("analysis_result") or item.get("analysis_json")
     if raw_analysis:
         analysis_data = json.loads(raw_analysis) if isinstance(raw_analysis, str) else raw_analysis
         music_mood = analysis_data.get("suggested_music_mood")
+        whisper_words = analysis_data.get("whisper_words")
         candidates = analysis_data.get("clip_candidates", [])
         if candidates:
             descs = [c.get("visual_description", "") for c in candidates]
@@ -784,6 +803,7 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
             music_mood=music_mood,
             karaoke=True,
             quality=quality,
+            whisper_words=whisper_words,
         )
 
         source["elements"], _ = apply_visual_blueprint(
