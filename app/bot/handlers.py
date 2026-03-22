@@ -796,6 +796,14 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
     creatomate = CreatomateService()
     quality_label = "🧪 Dev (720p)" if quality == "dev" else "🚀 Prod (1080p)"
     logger.debug("[Render] video_format=%r, music_mood=%r, clips=%d, quality=%s", video_format, music_mood, len(clips), quality)
+    # Extract transition offsets from blueprint for subtitle sync
+    transition_durations = []
+    if blueprint and "clips" in blueprint:
+        for j, clip_bp in enumerate(blueprint.get("clips", [])):
+            t = clip_bp.get("transition")
+            clip_dur = clips[j].trim_duration if j < len(clips) else 0
+            transition_durations.append(0.5 if t and clip_dur >= 2.5 else 0.0)
+
     try:
         source = creatomate.build_source(
             clips=clips,
@@ -804,6 +812,7 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
             karaoke=True,
             quality=quality,
             whisper_words=whisper_words,
+            transition_durations=transition_durations,
         )
 
         source["elements"], _ = apply_visual_blueprint(

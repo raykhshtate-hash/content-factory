@@ -322,6 +322,7 @@ class CreatomateService:
         voiceover_url: str | None = None,
         voiceover_duration: float = 0.0,
         whisper_words: dict[str, list[dict]] | None = None,
+        transition_durations: list[float] | None = None,
     ) -> dict:
         """
         Build Creatomate source JSON (elements + metadata).
@@ -359,6 +360,14 @@ class CreatomateService:
                 for clip in clips if clip.clip_type != "broll"
             )
         )
+
+        # Pre-compute cumulative transition offsets for subtitle sync
+        cumulative_offsets: list[float] = []
+        running = 0.0
+        if transition_durations:
+            for td in transition_durations:
+                running += td
+                cumulative_offsets.append(running)
 
         for i, clip in enumerate(clips):
             clip_name = f"clip-{i}"
@@ -401,17 +410,19 @@ class CreatomateService:
 
                     if clip_words:
                         phrases = _group_whisper_phrases(clip_words)
-                        clip_end_time = current_time + adjusted_duration
+                        # Cumulative transition offset: all preceding overlaps shift subtitles
+                        cumulative_offset = cumulative_offsets[i] if cumulative_offsets and i < len(cumulative_offsets) else 0.0
+                        clip_end_time = (current_time - cumulative_offset) + adjusted_duration
 
                         for p_i, phrase in enumerate(phrases):
-                            phrase_time = current_time + (phrase["start"] - adjusted_trim_start)
+                            phrase_time = (current_time - cumulative_offset) + (phrase["start"] - adjusted_trim_start)
 
                             # Skip phrases beyond clip end (prevents subtitles on black screen)
                             if phrase_time >= clip_end_time:
                                 continue
 
                             if p_i + 1 < len(phrases):
-                                next_time = current_time + (phrases[p_i + 1]["start"] - adjusted_trim_start)
+                                next_time = (current_time - cumulative_offset) + (phrases[p_i + 1]["start"] - adjusted_trim_start)
                                 phrase_dur = next_time - phrase_time
                             else:
                                 phrase_dur = max(0.3, clip_end_time - phrase_time)
@@ -472,6 +483,9 @@ class CreatomateService:
             current_time += adjusted_duration
 
         total_duration = current_time
+        # Subtract total transition overlap to match actual Creatomate timeline
+        if cumulative_offsets:
+            total_duration -= cumulative_offsets[-1]
 
         if voiceover_url:
             # Voiceover audio track
