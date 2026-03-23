@@ -425,6 +425,13 @@ class CreatomateService:
                         clip_words[0]["start"] if clip_words else -1,
                     )
 
+                    logger.info(
+                        "[Speech karaoke] clip=%d vid=%s trim=[%.2f-%.2f] raw_words=%d clip_words=%d first_word=%.2f",
+                        i, clip.video_index, clip.trim_start, trim_end,
+                        len(raw_words), len(clip_words),
+                        clip_words[0]["start"] if clip_words else -1,
+                    )
+
                     if clip_words:
                         phrases = _group_whisper_phrases(clip_words)
                         # Cumulative transition offset: all preceding overlaps shift subtitles
@@ -699,7 +706,7 @@ class CreatomateService:
             "frame_rate": fps,
             "elements": elements,
         }
-        if not voiceover_url and not hybrid_voiceover_url and not (voiceover_segments and per_clip_voiceover_url):
+        if not voiceover_url and not hybrid_voiceover_url:
             source["duration"] = total_duration
 
         mode = "storyboard" if voiceover_url else (

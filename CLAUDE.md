@@ -28,6 +28,14 @@ Video has audio (speaker on camera). Gemini selects best clips with timestamps. 
 ### storyboard (INBOX/storyboard/)
 Numbered clips (01.mp4, 02.mp4...) + `voiceover.mp3`. Video `volume: "0%"`. Single karaoke on track 3 with `transcript_source: "voiceover"`. Audio element `id="voiceover"` on track 2. Voiceover processed: silence removal → dynamic speedup (capped 1.5x) → re-speed for transition overlap. Stickers almost never (max 1).
 
+### Hybrid Mode (talking_head + voiceover)
+Per-clip voiceover architecture. Each matched broll gets its own audio element.
+Pipeline: Whisper voiceover → segments + words | Gemini semantic matching (broll → segment via `matched_voiceover_segment`) | Python dedup (one segment = one broll, `used_segments` set) | `build_source` per-clip audio on track 5 with `trim_start`/`trim_duration` from voiceover segment | Per-clip karaoke: `phrase_time = clip_render_start + (word.start - seg.start)`.
+Unmatched broll: volume 70% ambient, no audio element. Speech clips: original audio + speech karaoke.
+Ducking: REMOVED for hybrid. Voiceover only plays on matched broll, never overlaps speech.
+Supabase: `voiceover_segments` + `voiceover_words` + `voiceover_duration` in `analysis_data`.
+Clip dataclass: `matched_voiceover_segment` field added.
+
 ### Clip Pre-buffer
 **0.5s buffer before `trim_start`**: `adjusted_trim_start = max(0, trim_start - 0.5)`. Prevents cutting off phrase beginnings.
 
@@ -103,4 +111,4 @@ Stickers: timeline-based, provider `openai model=gpt-image-1.5`, `dynamic: true`
 - `handlers.py` callback flow | `deploy.sh` webhook setup | presigned URL caching in gcs_service
 
 ## Disabled Features
-Ken Burns | Compliance check | Script generation | Old B-roll pipeline (Pexels)
+Ken Burns | Compliance check | Script generation | Old B-roll pipeline (Pexels) | Ducking (hybrid mode — replaced by per-clip audio)

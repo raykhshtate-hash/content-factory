@@ -31,3 +31,15 @@ Format: `YYYY-MM-DD | Что случилось | Почему | Правило 
 ## Audio
 
 - 2026-03 | Audio gap between voiceover and video | Transition compensation calculated wrong overlap | → Fixed in v0.1.5: real gap instead of transition overlap only
+
+## Architecture
+
+- 2026-03-23 | One continuous voiceover audio element causes timeline sync issues | LLMs cannot calculate cumulative clip positions. Per-clip audio (Creatomate trim per segment) eliminates sync problems entirely.
+- 2026-03-23 | Ducking (ffmpeg volume filter) creates circular dependency with dynamic timeline assembly | Removing ducking simplified pipeline by ~50 lines and eliminated circular dependency.
+- 2026-03-23 | Gemini excels at semantic matching (broll → voiceover segment) but fails at cumulative math | Separate responsibilities: Gemini = semantics, Python = math.
+- 2026-03-23 | Voiceover segments are independent phrases, not continuous narrative | This insight unlocked per-clip architecture — clip order on timeline doesn't affect voiceover correctness.
+
+## Ops
+
+- 2026-03-23 | OpenAI billing limits silently break Creatomate renders | AI sticker generation via gpt-image-1.5 fails. Error only visible via Creatomate render status API, not in our logs.
+- 2026-03-23 | Google Drive JWT token expiry ("invalid_grant") | Caused by system clock drift. Fix: sync Mac clock via System Settings or `sudo sntp -sS time.apple.com`.
