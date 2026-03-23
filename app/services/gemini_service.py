@@ -31,6 +31,18 @@ class ClipCandidate(BaseModel):
         default="",
         description="Кратко что визуально в кадре: лицо спикера крупным планом, еда на столе, пейзаж города, руки делают процедуру — 5-10 слов",
     )
+    matched_voiceover_segment: int | None = Field(
+        default=None,
+        description="Для broll: 0-based индекс voiceover сегмента который этот клип визуально иллюстрирует. Для speech: всегда null.",
+    )
+    match_reason: str | None = Field(
+        default=None,
+        description="Почему этот broll подходит к этому сегменту voiceover (для дебага)",
+    )
+    unmatched_text_overlay: str | None = Field(
+        default=None,
+        description="Для broll БЕЗ matched voiceover: короткая игривая фраза 3-5 слов с юмором или вопросом. Для matched broll: null.",
+    )
 
 
 class StoryboardScene(BaseModel):
@@ -111,6 +123,7 @@ class GeminiService:
         prompt: str,
         model: str = "gemini-2.5-flash",
         audio_map: list[dict] | None = None,
+        voiceover_data: dict | None = None,
     ) -> Optional[VideoAnalysis]:
         """
         Analyze one or multiple videos directly from GCS via gs:// URIs.
@@ -142,6 +155,30 @@ class GeminiService:
                 "Пропусти этот сегмент.\n"
                 "- B-roll клипы должны быть визуально интересными: еда, пейзаж, детали, движение.\n"
                 "- Чередуй speech и broll для динамичного монтажа.\n"
+            )
+
+        # ── Inject voiceover transcript if provided ──
+        if voiceover_data:
+            vo_duration = voiceover_data["voiceover_duration"]
+            segments_formatted = "\n".join(
+                f'[Сегмент {idx}] [{s["start"]:.1f} - {s["end"]:.1f}с] "{s["text"]}"'
+                for idx, s in enumerate(voiceover_data["segments"])
+            )
+            prompt += (
+                "\n\n=== ЗАКАДРОВЫЙ ГОЛОС (VOICEOVER) ===\n"
+                "К этим видео есть отдельная озвучка! Это набор коротких независимых фраз.\n"
+                f"Общая длительность: {vo_duration:.1f} секунд.\n\n"
+                "СЕГМЕНТЫ ОЗВУЧКИ (пронумерованные):\n"
+                f"{segments_formatted}\n\n"
+                "ПРАВИЛА:\n"
+                "1. MATCHING: Для каждого broll клипа найди подходящий сегмент озвучки по СМЫСЛУ. "
+                "Если broll показывает пельмени, а сегмент 2 говорит про пельмени — "
+                "укажи matched_voiceover_segment: 2 и match_reason.\n"
+                "2. НЕ НАЙДЕН MATCH: Если для broll нет подходящего сегмента — "
+                "оставь matched_voiceover_segment: null и придумай unmatched_text_overlay: "
+                "короткую игривую фразу с юмором (3-5 слов, на русском).\n"
+                "3. ПОРЯДОК КЛИПОВ: На твоё усмотрение. Python автоматически привяжет аудио к каждому broll.\n"
+                "4. ОДИН СЕГМЕНТ = ОДИН BROLL: Не назначай один сегмент на несколько broll клипов.\n"
             )
 
         try:

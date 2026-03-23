@@ -179,6 +179,95 @@ async def process_voiceover(
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+async def apply_voiceover_ducking(
+    voiceover_gcs_uri: str,
+    ducking_intervals: list[dict],
+    total_duration: float,
+    content_id: str,
+) -> str | None:
+    """
+    Duck voiceover volume to 15% during speech intervals.
+
+    Args:
+        voiceover_gcs_uri: gs:// URI of the original voiceover
+        ducking_intervals: [{"start": 0.0, "end": 5.5}, ...] — speech timeline positions
+        total_duration: final reel duration (trim voiceover to this)
+        content_id: for GCS upload path
+
+    Returns: presigned URL of ducked voiceover, or None on failure.
+    """
+    gcs = GCSService()
+
+    signed_url = await asyncio.to_thread(
+        gcs.generate_presigned_url, voiceover_gcs_uri
+    )
+
+    tmp_dir = tempfile.mkdtemp()
+    raw_path = os.path.join(tmp_dir, "raw_voiceover.mp3")
+    ducked_path = os.path.join(tmp_dir, "ducked.mp3")
+
+    try:
+        import requests as req
+        resp = await asyncio.to_thread(
+            lambda: req.get(signed_url, stream=True, timeout=120)
+        )
+        resp.raise_for_status()
+        with open(raw_path, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                f.write(chunk)
+        resp.close()
+
+        # Build ffmpeg volume filter with ducking during speech
+        if ducking_intervals:
+            # volume=0.15 when ANY speech interval is active, else 1.0
+            enables = "+".join(
+                f"between(t,{iv['start']:.3f},{iv['end']:.3f})"
+                for iv in ducking_intervals
+            )
+            af_filter = f"volume=0.15:enable='{enables}'"
+        else:
+            # No speech intervals → full volume everywhere
+            af_filter = "volume=1.0"
+
+        cmd = [
+            "ffmpeg", "-y", "-i", raw_path,
+            "-af", af_filter,
+            "-t", f"{total_duration:.3f}",
+            "-ar", "44100",
+            ducked_path,
+        ]
+
+        result = await _run_ffmpeg(cmd, "voiceover ducking")
+        if result.returncode != 0:
+            logger.error("Voiceover ducking failed")
+            return None
+
+        # Upload ducked file to GCS
+        bucket_name = voiceover_gcs_uri.split("//")[1].split("/")[0]
+        ducked_gcs_path = f"renders/{content_id}/ducked_voiceover.mp3"
+
+        bucket = gcs._client.bucket(bucket_name)
+        blob = bucket.blob(ducked_gcs_path)
+        await asyncio.to_thread(blob.upload_from_filename, ducked_path)
+
+        ducked_gcs_uri = f"gs://{bucket_name}/{ducked_gcs_path}"
+        logger.info("Ducked voiceover uploaded: %s (%.1fs, %d speech intervals)",
+                     ducked_gcs_uri, total_duration, len(ducking_intervals))
+
+        # Generate presigned URL (6hr expiry)
+        ducked_url = await asyncio.to_thread(
+            gcs.generate_presigned_url, ducked_gcs_uri
+        )
+        return ducked_url
+
+    except Exception as e:
+        logger.error("Voiceover ducking failed: %s", e)
+        return None
+
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 async def adjust_voiceover_for_transitions(
     voiceover_gcs_uri: str,
     overlap_seconds: float,

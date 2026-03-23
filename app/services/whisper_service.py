@@ -139,14 +139,54 @@ class WhisperService:
         stop=stop_after_attempt(2),
         reraise=True,
     )
-    async def _do_transcribe(self, tmp_path: str):
+    async def _do_transcribe(self, tmp_path: str, granularities: list[str] | None = None, language: str | None = None):
+        if granularities is None:
+            granularities = ["word"]
         with open(tmp_path, "rb") as audio_file:
-            return await self.client.audio.transcriptions.create(
-                model=self.model,
-                file=audio_file,
-                response_format="verbose_json",
-                timestamp_granularities=["word"]
-            )
+            kwargs = {
+                "model": self.model,
+                "file": audio_file,
+                "response_format": "verbose_json",
+                "timestamp_granularities": granularities,
+            }
+            if language is not None:
+                kwargs["language"] = language
+            return await self.client.audio.transcriptions.create(**kwargs)
+
+    async def _download_and_convert(
+        self, url: str, trim_start: int = 0, trim_duration: int | None = None
+    ) -> tuple[str, str]:
+        """Download media from URL and convert to mp3 via ffmpeg.
+        Returns (input_path, output_mp3_path). Caller must clean up both files.
+        """
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_in:
+            tmp_in_path = tmp_in.name
+
+        async with httpx.AsyncClient(timeout=120) as http:
+            async with http.stream("GET", url) as r:
+                r.raise_for_status()
+                with open(tmp_in_path, "wb") as f:
+                    async for chunk in r.aiter_bytes(chunk_size=1024 * 1024):
+                        f.write(chunk)
+
+        tmp_out_path = tmp_in_path.replace(".mp4", "_trimmed.mp3")
+
+        cmd = ["ffmpeg", "-y", "-i", tmp_in_path]
+        if trim_start > 0:
+            cmd.extend(["-ss", str(trim_start)])
+        if trim_duration:
+            cmd.extend(["-t", str(trim_duration)])
+        cmd.extend([
+            "-vn",
+            "-acodec", "libmp3lame",
+            "-ab", "128k",
+            "-ar", "44100",
+            "-ac", "2",
+            tmp_out_path,
+        ])
+
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return tmp_in_path, tmp_out_path
 
     async def transcribe_url_with_timestamps(
         self, video_url: str, trim_start: int = 0, trim_duration: int | None = None
@@ -158,42 +198,15 @@ class WhisperService:
         tmp_in_path = None
         tmp_out_path = None
         try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_in:
-                tmp_in_path = tmp_in.name
-                
-            async with httpx.AsyncClient(timeout=120) as http:
-                async with http.stream("GET", video_url) as r:
-                    r.raise_for_status()
-                    with open(tmp_in_path, "wb") as f:
-                        async for chunk in r.aiter_bytes(chunk_size=1024 * 1024):
-                            f.write(chunk)
+            tmp_in_path, tmp_out_path = await self._download_and_convert(
+                video_url, trim_start, trim_duration
+            )
 
-            # ffmpeg command...
-            tmp_out_path = tmp_in_path.replace(".mp4", "_trimmed.mp3")
-            
-            cmd = ["ffmpeg", "-y", "-i", tmp_in_path]
-            if trim_start > 0:
-                cmd.extend(["-ss", str(trim_start)])
-            if trim_duration:
-                cmd.extend(["-t", str(trim_duration)])
-                
-            cmd.extend([
-                "-vn",             # No video
-                "-acodec", "libmp3lame",
-                "-ab", "128k",
-                "-ar", "44100",
-                "-ac", "2",
-                tmp_out_path
-            ])
-
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-            # Run API call via Tenacity wrapped function
             transcription = await self._do_transcribe(tmp_out_path)
 
             if not hasattr(transcription, "words") or not transcription.words:
                 return []
-                
+
             result = []
             for word_info in transcription.words:
                 result.append({
@@ -201,12 +214,96 @@ class WhisperService:
                     "start": word_info.start,
                     "end": word_info.end
                 })
-                
+
             return result
 
         except Exception as e:
             logger.error(f"Whisper transcription failed for {video_url}: {e}")
-            return [] # Non-fatal, just return no subtitles if it's completely dead
+            return []
+
+        finally:
+            if tmp_in_path and os.path.exists(tmp_in_path):
+                os.remove(tmp_in_path)
+            if tmp_out_path and os.path.exists(tmp_out_path):
+                os.remove(tmp_out_path)
+
+    async def transcribe_url_with_segments(self, url: str) -> dict | None:
+        """Transcribe audio URL and return segment-level timestamps.
+        For voiceover awareness in Gemini prompt.
+
+        Returns {"voiceover_duration": float, "segments": [{"start", "end", "text"}, ...]}
+        or None on failure.
+        """
+        tmp_in_path = None
+        tmp_out_path = None
+        try:
+            tmp_in_path, tmp_out_path = await self._download_and_convert(url)
+
+            transcription = await self._do_transcribe(
+                tmp_out_path, granularities=["word", "segment"], language="ru"
+            )
+
+            segments_raw = getattr(transcription, "segments", None)
+            if not segments_raw:
+                logger.warning("Voiceover transcription returned no segments")
+                return None
+
+            segments = []
+            for seg in segments_raw:
+                start = getattr(seg, "start", None)
+                if start is None and isinstance(seg, dict):
+                    start = seg.get("start")
+                end = getattr(seg, "end", None)
+                if end is None and isinstance(seg, dict):
+                    end = seg.get("end")
+                text = getattr(seg, "text", None)
+                if text is None and isinstance(seg, dict):
+                    text = seg.get("text", "")
+
+                if start is not None and end is not None:
+                    segments.append({
+                        "start": float(start),
+                        "end": float(end),
+                        "text": str(text).strip(),
+                    })
+
+            if not segments:
+                logger.warning("Voiceover transcription: no valid segments extracted")
+                return None
+
+            vo_duration = segments[-1]["end"]
+            if vo_duration < 3.0:
+                logger.warning("Voiceover too short (%.1fs), skipping", vo_duration)
+                return None
+
+            # Extract word-level timestamps for broll popup karaoke
+            words = []
+            words_raw = getattr(transcription, "words", None)
+            if words_raw:
+                for w in words_raw:
+                    w_start = getattr(w, "start", None)
+                    if w_start is None and isinstance(w, dict):
+                        w_start = w.get("start")
+                    w_end = getattr(w, "end", None)
+                    if w_end is None and isinstance(w, dict):
+                        w_end = w.get("end")
+                    w_word = getattr(w, "word", None)
+                    if w_word is None and isinstance(w, dict):
+                        w_word = w.get("word", "")
+                    if w_start is not None and w_end is not None:
+                        words.append({
+                            "word": str(w_word),
+                            "start": float(w_start),
+                            "end": float(w_end),
+                        })
+
+            logger.info("Voiceover transcribed: %d segments, %d words, %.1fs duration",
+                        len(segments), len(words), vo_duration)
+            return {"voiceover_duration": vo_duration, "segments": segments, "words": words}
+
+        except Exception as e:
+            logger.warning("Voiceover segment transcription failed: %s", e)
+            return None
 
         finally:
             if tmp_in_path and os.path.exists(tmp_in_path):

@@ -442,7 +442,15 @@ async def cmd_ready(message: types.Message):
         all_files = sb_videos + [sb_audio[0]]  # audio LAST — important for URI split later
         source_label = "storyboard"
     else:
-        all_files = th_videos
+        # talking_head: check for optional voiceover audio
+        th_audio = [f for f in th_files if f['name'].lower().endswith(AUDIO_EXT)]
+        if th_audio:
+            th_audio.sort(key=lambda f: f['name'])
+            if len(th_audio) > 1:
+                logger.warning("Multiple audio files in talking_head, using first: %s", th_audio[0]['name'])
+            all_files = th_videos + [th_audio[0]]  # audio LAST — same pattern as storyboard
+        else:
+            all_files = th_videos
         source_label = "talking_head"
 
     await update_progress(status_msg, 1,
@@ -487,8 +495,13 @@ async def cmd_ready(message: types.Message):
         video_gcs_uris = gcs_uris[:-1]
         voiceover_gcs_uri = gcs_uris[-1]
     else:
-        video_gcs_uris = gcs_uris
-        voiceover_gcs_uri = None
+        if th_audio and len(gcs_uris) > len(th_videos):
+            # Audio was added last in all_files
+            video_gcs_uris = gcs_uris[:len(th_videos)]
+            voiceover_gcs_uri = gcs_uris[len(th_videos)]
+        else:
+            video_gcs_uris = gcs_uris
+            voiceover_gcs_uri = None
 
     # Phase update
     if is_storyboard:
@@ -523,12 +536,14 @@ async def cmd_ready(message: types.Message):
         )
     else:
         try:
-            await supabase_service.update_item(
-                item_id,
+            update_kwargs = dict(
                 status="analyzing",
                 content_mode="talking_head",
                 gcs_uris=video_gcs_uris,
             )
+            if voiceover_gcs_uri:
+                update_kwargs["voiceover_gcs_uri"] = voiceover_gcs_uri
+            await supabase_service.update_item(item_id, **update_kwargs)
         except Exception:
             await supabase_service.update_item(item_id, status="analyzing")
 
@@ -538,9 +553,10 @@ async def cmd_ready(message: types.Message):
 async def analyze_and_propose(chat_id: int, item_id: str, gcs_uris: list[str], status_msg: types.Message):
     """Background asyncio task for Gemini Video Analysis."""
     await update_progress(status_msg, 2, "Запустил Gemini 3.0 Flash для поиска лучших моментов...")
-    
+
     item = await supabase_service.get_item(item_id)
     scenario_text = item.get("script", "") if item else ""
+    voiceover_gcs_uri = item.get("voiceover_gcs_uri") if item else None
     
     prompt = (
         f"Тебе передано {len(gcs_uris)} видео. "
@@ -584,23 +600,31 @@ async def analyze_and_propose(chat_id: int, item_id: str, gcs_uris: list[str], s
 
     # ── Whisper audio analysis for clip_type ──
     audio_map = None
+    voiceover_data = None
     try:
         gcs_service = GCSService()
 
         async def _sign(uri):
             return await asyncio.to_thread(gcs_service.generate_presigned_url, uri)
 
-        signed_urls = await asyncio.gather(*[_sign(u) for u in video_uris])
+        sign_tasks = [_sign(u) for u in video_uris]
+        if voiceover_gcs_uri:
+            sign_tasks.append(_sign(voiceover_gcs_uri))
+        sign_results = await asyncio.gather(*sign_tasks)
+        signed_urls = sign_results[:len(video_uris)]
+        vo_signed_url = sign_results[len(video_uris)] if voiceover_gcs_uri else None
 
         async def _transcribe_one(url):
             words = await whisper.transcribe_url_with_timestamps(url)
             segments = analyze_silence(words) if words else []
             return {"words": words, "segments": segments}
 
-        results = await asyncio.gather(
-            *[_transcribe_one(u) for u in signed_urls],
-            return_exceptions=True,
-        )
+        whisper_tasks = [_transcribe_one(u) for u in signed_urls]
+        if vo_signed_url:
+            whisper_tasks.append(whisper.transcribe_url_with_segments(vo_signed_url))
+        all_results = await asyncio.gather(*whisper_tasks, return_exceptions=True)
+        results = all_results[:len(signed_urls)]
+        vo_result = all_results[len(signed_urls)] if vo_signed_url else None
 
         whisper_words = {}  # {video_index_str: [{word, start, end}]}
         map_entries = []
@@ -621,13 +645,23 @@ async def analyze_and_propose(chat_id: int, item_id: str, gcs_uris: list[str], s
         else:
             logger.warning("All Whisper transcriptions empty/failed — proceeding without audio_map")
 
+        # ── Voiceover transcript for Gemini awareness ──
+        if vo_result is not None:
+            if isinstance(vo_result, Exception):
+                logger.warning("Voiceover transcription failed: %s — proceeding without voiceover awareness", vo_result)
+            else:
+                voiceover_data = vo_result
+                logger.info("Voiceover data ready: %.1fs, %d segments",
+                            vo_result["voiceover_duration"], len(vo_result["segments"]))
+
     except Exception as e:
         logger.error("Whisper pipeline error: %s — proceeding without audio_map", e)
         audio_map = None
+        voiceover_data = None
         whisper_words = {}
 
     gemini = GeminiService()
-    analysis = await gemini.analyze_video(video_uris, prompt, audio_map=audio_map)
+    analysis = await gemini.analyze_video(video_uris, prompt, audio_map=audio_map, voiceover_data=voiceover_data)
     
     if not analysis:
         # Fallback Mode
@@ -654,6 +688,11 @@ async def analyze_and_propose(chat_id: int, item_id: str, gcs_uris: list[str], s
         result_data = analysis.model_dump()
         if whisper_words:
             result_data["whisper_words"] = whisper_words
+        if voiceover_data and voiceover_data.get("words"):
+            result_data["voiceover_words"] = voiceover_data["words"]
+        if voiceover_data and voiceover_data.get("segments"):
+            result_data["voiceover_segments"] = voiceover_data["segments"]
+            result_data["voiceover_duration"] = voiceover_data["voiceover_duration"]
         await supabase_service.update_item(
             item_id,
             status="ready_for_render",
@@ -732,12 +771,14 @@ async def _candidates_to_clips(candidates, gcs_uris: list[str], gcs_service: GCS
             )
         signed_url = _signed_cache[gcs_uri]
         clip_type = c.get("clip_type", "speech") if isinstance(c, dict) else getattr(c, "clip_type", "speech")
+        matched_seg = c.get("matched_voiceover_segment") if isinstance(c, dict) else getattr(c, "matched_voiceover_segment", None)
         clips.append(Clip(
             source=signed_url,
             trim_start=start,
             trim_duration=end - start,
             clip_type=clip_type,
             video_index=v_idx + 1,
+            matched_voiceover_segment=matched_seg,
         ))
     return clips
 
@@ -757,11 +798,13 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
     music_mood = None
     clip_descriptions = None
     whisper_words = None
+    voiceover_words = None
     raw_analysis = item.get("analysis_result") or item.get("analysis_json")
     if raw_analysis:
         analysis_data = json.loads(raw_analysis) if isinstance(raw_analysis, str) else raw_analysis
         music_mood = analysis_data.get("suggested_music_mood")
         whisper_words = analysis_data.get("whisper_words")
+        voiceover_words = analysis_data.get("voiceover_words")
         candidates = analysis_data.get("clip_candidates", [])
         if candidates:
             descs = [c.get("visual_description", "") for c in candidates]
@@ -804,6 +847,48 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
             clip_dur = clips[j].trim_duration if j < len(clips) else 0
             transition_durations.append(0.5 if t and clip_dur >= 2.5 else 0.0)
 
+    # ── Hybrid mode: per-clip voiceover for talking_head ──
+    voiceover_segments = None
+    signed_voiceover_url = None
+    th_voiceover_gcs_uri = item.get("voiceover_gcs_uri")
+    if th_voiceover_gcs_uri and item.get("content_mode") == "talking_head":
+        # Extract voiceover segments from analysis data (saved by analyze_and_propose)
+        voiceover_segments = analysis_data.get("voiceover_segments") if analysis_data else None
+
+        if voiceover_segments:
+            # Sign raw voiceover URL for Creatomate per-clip trim
+            gcs_service = GCSService()
+            try:
+                signed_voiceover_url = await asyncio.to_thread(
+                    gcs_service.generate_presigned_url, th_voiceover_gcs_uri
+                )
+            except Exception as e:
+                logger.error("Failed to sign voiceover URL: %s", e)
+                signed_voiceover_url = None
+
+            # Deduplicate: one segment → one broll (first wins)
+            used_segments: set[int] = set()
+            for ci, clip in enumerate(clips):
+                if clip.matched_voiceover_segment is not None:
+                    if clip.matched_voiceover_segment in used_segments:
+                        logger.info("[Dedup] clip %d lost segment %d (already used)", ci, clip.matched_voiceover_segment)
+                        clip.matched_voiceover_segment = None
+                    else:
+                        used_segments.add(clip.matched_voiceover_segment)
+
+            # Diagnostic logging
+            matched = sum(1 for c in clips if c.matched_voiceover_segment is not None)
+            broll_count = sum(1 for c in clips if c.clip_type == "broll")
+            logger.info(
+                "Per-clip voiceover: %d/%d broll clips matched, %d segments available",
+                matched, broll_count, len(voiceover_segments),
+            )
+            for ci, clip in enumerate(clips):
+                if clip.clip_type == "broll":
+                    logger.info("[Mapping] clip %d (broll) → Seg %s", ci, clip.matched_voiceover_segment)
+        else:
+            logger.info("Hybrid mode: no voiceover_segments in analysis — rendering without per-clip audio")
+
     try:
         source = creatomate.build_source(
             clips=clips,
@@ -812,7 +897,10 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
             karaoke=True,
             quality=quality,
             whisper_words=whisper_words,
+            voiceover_words=voiceover_words,
             transition_durations=transition_durations,
+            voiceover_segments=voiceover_segments,
+            per_clip_voiceover_url=signed_voiceover_url,
         )
 
         source["elements"], _ = apply_visual_blueprint(

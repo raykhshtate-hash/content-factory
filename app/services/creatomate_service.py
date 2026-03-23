@@ -30,6 +30,7 @@ class Clip:
     trim_duration: float
     clip_type: str = "speech"     # "speech" or "broll"
     video_index: int = 1          # 1-based, for whisper_words lookup
+    matched_voiceover_segment: int | None = None  # 0-based index into voiceover_segments
 
 
 # ── Quality presets ─────────────────────────────────────────────
@@ -322,7 +323,11 @@ class CreatomateService:
         voiceover_url: str | None = None,
         voiceover_duration: float = 0.0,
         whisper_words: dict[str, list[dict]] | None = None,
+        voiceover_words: list[dict] | None = None,
         transition_durations: list[float] | None = None,
+        hybrid_voiceover_url: str | None = None,
+        voiceover_segments: list[dict] | None = None,
+        per_clip_voiceover_url: str | None = None,
     ) -> dict:
         """
         Build Creatomate source JSON (elements + metadata).
@@ -352,6 +357,7 @@ class CreatomateService:
         style = KARAOKE_STYLES.get(mood_key, KARAOKE_STYLES["professional"]) if karaoke else {}
 
         # Decide: Whisper popup subtitles vs transcript_source fallback
+        # Hybrid mode (hybrid_voiceover_url) also uses Whisper popup for speech clips
         use_whisper_karaoke = (
             whisper_words is not None
             and not voiceover_url
@@ -390,6 +396,10 @@ class CreatomateService:
 
             if voiceover_url:
                 video_el["volume"] = "0%"
+            elif voiceover_segments and clip.matched_voiceover_segment is not None:
+                video_el["volume"] = "0%"  # Per-clip: voiceover replaces broll ambient
+            elif hybrid_voiceover_url and clip.clip_type == "broll":
+                video_el["volume"] = "0%"  # Legacy hybrid: voiceover replaces broll ambient
             elif clip.clip_type == "broll":
                 video_el["volume"] = "70%"
 
@@ -407,6 +417,13 @@ class CreatomateService:
                     clip_words = [
                         {**w, "end": min(w["end"], trim_end)} for w in clip_words
                     ]
+
+                    logger.info(
+                        "[Speech karaoke] clip=%d vid=%s trim=[%.2f-%.2f] raw_words=%d clip_words=%d first_word=%.2f",
+                        i, clip.video_index, clip.trim_start, trim_end,
+                        len(raw_words), len(clip_words),
+                        clip_words[0]["start"] if clip_words else -1,
+                    )
 
                     if clip_words:
                         phrases = _group_whisper_phrases(clip_words)
@@ -480,6 +497,137 @@ class CreatomateService:
                     karaoke_el.update(style)
                     karaoke_elements.append(karaoke_el)
 
+            # ── Per-clip voiceover audio + karaoke (new hybrid per-clip mode) ──
+            if (
+                clip.clip_type == "broll"
+                and clip.matched_voiceover_segment is not None
+                and voiceover_segments
+                and per_clip_voiceover_url
+            ):
+                seg_idx = clip.matched_voiceover_segment
+                if 0 <= seg_idx < len(voiceover_segments):
+                    segment = voiceover_segments[seg_idx]
+                    seg_start = segment["start"]
+                    seg_end = segment["end"]
+                    seg_duration = seg_end - seg_start
+                    cumulative_offset = cumulative_offsets[i] if cumulative_offsets and i < len(cumulative_offsets) else 0.0
+                    clip_render_start = current_time - cumulative_offset
+
+                    # Safety: audio trim_duration never exceeds broll duration
+                    trim_dur = min(seg_duration, adjusted_duration)
+
+                    audio_el = {
+                        "type": "audio",
+                        "track": 5,
+                        "time": round(clip_render_start, 3),
+                        "source": per_clip_voiceover_url,
+                        "trim_start": round(seg_start, 3),
+                        "trim_duration": round(trim_dur, 3),
+                        "volume": "100%",
+                    }
+                    elements.append(audio_el)
+                    logger.info(
+                        "[Per-clip audio] clip=%d, track=5, time=%.2f, trim_start=%.2f, trim_dur=%.2f",
+                        i, clip_render_start, seg_start, trim_dur,
+                    )
+
+                    # Per-clip karaoke: filter voiceover_words to this segment
+                    if karaoke and voiceover_words:
+                        seg_words = [
+                            w for w in voiceover_words
+                            if w["start"] >= seg_start and w["start"] < seg_end
+                            and (w["start"] - seg_start) < trim_dur
+                        ]
+                        if seg_words:
+                            phrases = _group_whisper_phrases(seg_words)
+                            broll_end_time = clip_render_start + adjusted_duration
+                            for p_i, phrase in enumerate(phrases):
+                                phrase_time = clip_render_start + (phrase["start"] - seg_start)
+                                if phrase_time >= broll_end_time:
+                                    continue
+                                if p_i + 1 < len(phrases):
+                                    next_time = clip_render_start + (phrases[p_i + 1]["start"] - seg_start)
+                                    phrase_dur = next_time - phrase_time
+                                else:
+                                    phrase_dur = max(0.3, broll_end_time - phrase_time)
+
+                                text_el = {
+                                    "type": "text",
+                                    "track": 2,
+                                    "time": round(phrase_time, 3),
+                                    "duration": round(phrase_dur, 3),
+                                    "text": phrase["text"],
+                                    "width": "90%",
+                                    "height": "20%",
+                                    "x": "50%",
+                                    "y": "78%",
+                                    "x_alignment": "50%",
+                                    "y_alignment": "50%",
+                                    "font_family": "Montserrat",
+                                    "font_weight": "700",
+                                    "font_size": "6 vmin",
+                                    "stroke_color": "#000000",
+                                    "stroke_width": "1.6 vmin",
+                                }
+                                text_el.update(style)
+                                if "transcript_color" in text_el:
+                                    text_el["fill_color"] = text_el.pop("transcript_color")
+                                karaoke_elements.append(text_el)
+                            logger.info(
+                                "[VO Karaoke] clip=%d, phrases=%d, first='%s' at %.2f",
+                                i, len(phrases), phrases[0]["text"][:20], clip_render_start + (phrases[0]["start"] - seg_start),
+                            )
+
+            # ── Broll popup karaoke from voiceover (legacy — skipped when per-clip active) ──
+            elif karaoke and clip.clip_type == "broll" and voiceover_words and not voiceover_url:
+                cumulative_offset = cumulative_offsets[i] if cumulative_offsets and i < len(cumulative_offsets) else 0.0
+                broll_render_start = current_time - cumulative_offset
+                broll_render_end = broll_render_start + adjusted_duration
+
+                broll_words = [
+                    w for w in voiceover_words
+                    if w["start"] >= broll_render_start and w["start"] < broll_render_end
+                ]
+
+                if broll_words:
+                    broll_phrases = _group_whisper_phrases(broll_words)
+
+                    for p_i, phrase in enumerate(broll_phrases):
+                        phrase_time = phrase["start"]
+
+                        if p_i + 1 < len(broll_phrases):
+                            phrase_dur = broll_phrases[p_i + 1]["start"] - phrase_time
+                        else:
+                            phrase_dur = max(0.3, broll_render_end - phrase_time)
+
+                        text_el = {
+                            "type": "text",
+                            "track": 2,
+                            "time": round(phrase_time, 3),
+                            "duration": round(phrase_dur, 3),
+                            "text": phrase["text"],
+                            "width": "90%",
+                            "height": "20%",
+                            "x": "50%",
+                            "y": "78%",
+                            "x_alignment": "50%",
+                            "y_alignment": "50%",
+                            "font_family": "Montserrat",
+                            "font_weight": "700",
+                            "font_size": "6 vmin",
+                            "stroke_color": "#000000",
+                            "stroke_width": "1.6 vmin",
+                        }
+                        text_el.update(style)
+                        if "transcript_color" in text_el:
+                            text_el["fill_color"] = text_el.pop("transcript_color")
+                        logger.debug(
+                            "Broll karaoke: text=%r time=%.3f dur=%.3f | broll_start=%.2f broll_end=%.2f",
+                            phrase["text"][:20], phrase_time, phrase_dur,
+                            broll_render_start, broll_render_end,
+                        )
+                        karaoke_elements.append(text_el)
+
             current_time += adjusted_duration
 
         total_duration = current_time
@@ -488,7 +636,7 @@ class CreatomateService:
             total_duration -= cumulative_offsets[-1]
 
         if voiceover_url:
-            # Voiceover audio track
+            # Storyboard: voiceover audio track
             elements.append({
                 "type": "audio",
                 "id": "voiceover",
@@ -522,6 +670,24 @@ class CreatomateService:
                 }
                 vo_karaoke.update(style)
                 elements.append(vo_karaoke)
+        elif voiceover_segments and per_clip_voiceover_url:
+            # Per-clip hybrid mode: audio elements already added in clip loop
+            elements.extend(karaoke_elements)
+            logger.info("Per-clip hybrid mode: %d audio elements on track 5",
+                         sum(1 for el in elements if el.get("type") == "audio" and el.get("track") == 5))
+        elif hybrid_voiceover_url:
+            # Legacy hybrid mode: ducked voiceover on track 5 (isolated), Whisper popup on track 2
+            elements.extend(karaoke_elements)
+            hybrid_audio_el = {
+                "type": "audio",
+                "id": "hybrid_voiceover",
+                "track": 5,
+                "time": 0,
+                "source": hybrid_voiceover_url,
+                "volume": "100%",
+            }
+            logger.info("Hybrid audio element: %s", {k: (v[:60] + '...' if isinstance(v, str) and len(v) > 60 else v) for k, v in hybrid_audio_el.items()})
+            elements.append(hybrid_audio_el)
         else:
             elements.extend(karaoke_elements)
 
@@ -533,15 +699,29 @@ class CreatomateService:
             "frame_rate": fps,
             "elements": elements,
         }
-        if not voiceover_url:
+        if not voiceover_url and not hybrid_voiceover_url and not (voiceover_segments and per_clip_voiceover_url):
             source["duration"] = total_duration
 
+        mode = "storyboard" if voiceover_url else (
+            "hybrid-perclip" if (voiceover_segments and per_clip_voiceover_url) else (
+                "hybrid" if hybrid_voiceover_url else "talking_head"
+            )
+        )
         logger.info(
             "Creatomate source built: format=%s, quality=%s (%dx%d@%dfps), clips=%d, "
-            "karaoke=%s, mood=%s, voiceover=%s",
+            "karaoke=%s, mood=%s, mode=%s",
             video_format, quality, width, height, fps, len(clips), karaoke,
-            music_mood, bool(voiceover_url),
+            music_mood, mode,
         )
+
+        # Dump payload for debugging (truncate URLs to keep log readable)
+        if mode in ("hybrid", "hybrid-perclip"):
+            import json as _json
+            debug_src = _json.loads(_json.dumps(source))
+            for el in debug_src.get("elements", []):
+                if "source" in el and len(str(el["source"])) > 80:
+                    el["source"] = el["source"][:60] + "...[truncated]"
+            logger.info("Hybrid payload: %s", _json.dumps(debug_src, indent=2))
 
         return source
 
