@@ -425,13 +425,6 @@ class CreatomateService:
                         clip_words[0]["start"] if clip_words else -1,
                     )
 
-                    logger.info(
-                        "[Speech karaoke] clip=%d vid=%s trim=[%.2f-%.2f] raw_words=%d clip_words=%d first_word=%.2f",
-                        i, clip.video_index, clip.trim_start, trim_end,
-                        len(raw_words), len(clip_words),
-                        clip_words[0]["start"] if clip_words else -1,
-                    )
-
                     if clip_words:
                         phrases = _group_whisper_phrases(clip_words)
                         # Cumulative transition offset: all preceding overlaps shift subtitles

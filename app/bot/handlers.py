@@ -460,7 +460,7 @@ async def cmd_ready(message: types.Message):
     gcs_bucket = settings.GCS_BUCKET_NAME
     gcs_uris = []
     failed_files = []
-    
+
     for idx, file_meta in enumerate(all_files, 1):
         file_id = file_meta['id']
         file_name = file_meta['name']
@@ -474,7 +474,7 @@ async def cmd_ready(message: types.Message):
             print(f"File copy error for {file_name}: {e}")
             failed_files.append(file_name)
             continue
-        
+
         # Delete is best-effort — don't let it kill the pipeline
         try:
             await asyncio.to_thread(drive_service.delete_file, file_id)
@@ -888,6 +888,27 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
                     logger.info("[Mapping] clip %d (broll) → Seg %s", ci, clip.matched_voiceover_segment)
         else:
             logger.info("Hybrid mode: no voiceover_segments in analysis — rendering without per-clip audio")
+
+    # ── Post-processing: trim speech clips to first spoken word ──
+    if whisper_words:
+        for clip in clips:
+            if clip.clip_type != "speech":
+                continue
+            words = whisper_words.get(str(clip.video_index), [])
+            trim_end = clip.trim_start + clip.trim_duration
+            clip_words = [w for w in words if clip.trim_start <= w["start"] < trim_end]
+            if not clip_words:
+                logger.warning("Speech trim check: video %d [%.1f-%.1f] — no Whisper words", clip.video_index, clip.trim_start, trim_end)
+                continue
+            first_word = clip_words[0]
+            gap = first_word["start"] - clip.trim_start
+            if gap > 1.0:
+                old_start = clip.trim_start
+                new_start = max(first_word["start"] - 0.3, clip.trim_start)
+                shift = new_start - clip.trim_start
+                clip.trim_start = new_start
+                clip.trim_duration -= shift
+                logger.info("Speech trim adjusted: video %d, shifted trim_start %.1f → %.1f (first word at %.1fs)", clip.video_index, old_start, clip.trim_start, first_word["start"])
 
     try:
         source = creatomate.build_source(
