@@ -171,10 +171,109 @@ def _group_whisper_phrases(words: list[dict], max_chars: int = 15) -> list[dict]
     return phrases
 
 
+def resolve_overlay_render_times(
+    anchored_overlays: list[dict],
+    clips: list[Clip],
+    clip_render_starts: list[float],
+    total_render_duration: float,
+) -> list[dict]:
+    """Convert anchor-based overlays (audio_time) to render-time sticker elements.
+
+    Two-pass algorithm: compute all render times first, sort, then place with
+    pre-cap to guarantee 0.5s gaps. Track 4 is independent — no clip boundary clamping.
+    """
+    # --- Pass 1: compute render_time for all valid overlays ---
+    candidates: list[tuple[float, float, dict]] = []  # (render_time, requested_duration, overlay)
+
+    for ov in anchored_overlays:
+        clip_index = ov.get("clip_index")
+        audio_time = ov.get("audio_time")
+        prompt = ov.get("image_prompt", "")
+        duration_seconds = ov.get("duration_seconds", 6)
+
+        if not prompt or clip_index is None or audio_time is None:
+            continue
+        if clip_index < 0 or clip_index >= len(clips):
+            logger.warning("resolve_overlay: clip_index %d out of range, skipping", clip_index)
+            continue
+
+        clip = clips[clip_index]
+        adjusted_trim_start = max(0, clip.trim_start - 0.5)
+        trim_end = clip.trim_start + clip.trim_duration
+
+        if audio_time > trim_end:
+            logger.debug("resolve_overlay: audio_time %.2f > trim_end %.2f, skipping", audio_time, trim_end)
+            continue
+
+        # Map audio_time → render_time
+        if audio_time < clip.trim_start:
+            render_time = clip_render_starts[clip_index]
+        else:
+            render_time = clip_render_starts[clip_index] + (audio_time - adjusted_trim_start)
+
+        candidates.append((render_time, float(duration_seconds), ov))
+
+    # Sort by render_time
+    candidates.sort(key=lambda c: c[0])
+
+    # --- Pass 2: place with pre-cap ---
+    sticker_elements: list[dict] = []
+    sticker_idx = 0
+
+    for i, (render_time, requested_duration, ov) in enumerate(candidates):
+        # Safe start margin
+        if render_time < 2.0:
+            logger.debug("resolve_overlay: render_time %.2f < 2s, skipping", render_time)
+            continue
+
+        # Safe end margin
+        duration = min(requested_duration, total_render_duration - render_time - 2.0)
+
+        # Pre-cap: ensure 0.5s gap before next sticker
+        if i + 1 < len(candidates):
+            next_render_time = candidates[i + 1][0]
+            duration = min(duration, next_render_time - render_time - 0.5)
+
+        if duration < 1.5:
+            logger.debug("resolve_overlay: duration %.2f < 1.5s after caps, skipping", duration)
+            continue
+
+        default_x = "75%" if sticker_idx % 2 == 0 else "25%"
+        sticker_el = {
+            "type": "image",
+            "track": 4,
+            "time": round(render_time, 3),
+            "duration": round(duration, 3),
+            "x": ov.get("x", default_x),
+            "y": ov.get("y", "60%"),
+            "width": ov.get("width", "25%"),
+            "height": ov.get("height", "25%"),
+            "source": ov.get("image_prompt", ""),
+            "provider": "openai model=gpt-image-1.5",
+            "dynamic": True,
+            "border_radius": 50,
+            "opacity": "85%",
+            "animations": [
+                _build_sticker_anim(ov.get("sticker_enter_animation", "fade"), is_exit=False),
+                _build_sticker_anim(ov.get("sticker_exit_animation", "fade"), is_exit=True),
+            ],
+        }
+        sticker_elements.append(sticker_el)
+        sticker_idx += 1
+        logger.info(
+            "resolve_overlay: anchor=%s render_time=%.2f duration=%.2f clip=%d",
+            ov.get("anchor_id", "?"), render_time, duration, ov.get("clip_index"),
+        )
+
+    return sticker_elements
+
+
 def apply_visual_blueprint(
     elements: list[dict],
     blueprint: dict,
     clip_durations: list[float],
+    anchored_overlays: list[dict] | None = None,
+    clips: list[Clip] | None = None,
 ) -> tuple[list[dict], int]:
     """Apply visual blueprint (transitions + sticker overlays) to elements.
 
@@ -222,51 +321,59 @@ def apply_visual_blueprint(
                     video_el["animations"].append(anim)
                     transition_count += 1
 
-    # ── Sticker overlays (top-level, timeline-based) ──
-    for overlay in blueprint.get("overlays", []):
-        if overlay.get("type") != "ai_image":
-            continue
-        prompt = overlay.get("image_prompt", "")
-        if not prompt:
-            continue
-        start = overlay.get("start_second")
-        end = overlay.get("end_second")
-        if start is None or end is None:
-            continue
-        sticker_duration = float(end - start)
-        if sticker_duration < 4.0:
-            continue
-        sticker_time = float(start)
+    # ── Sticker overlays ──
+    if anchored_overlays is not None and clips is not None:
+        # Anchor-based: resolve audio_time → render_time using karaoke formula
+        sticker_els = resolve_overlay_render_times(
+            anchored_overlays, clips, clip_render_starts, total_render_duration,
+        )
+        elements.extend(sticker_els)
+    else:
+        # Legacy timeline-based stickers (backward compat)
+        for overlay in blueprint.get("overlays", []):
+            if overlay.get("type") != "ai_image":
+                continue
+            prompt = overlay.get("image_prompt", "")
+            if not prompt:
+                continue
+            start = overlay.get("start_second")
+            end = overlay.get("end_second")
+            if start is None or end is None:
+                continue
+            sticker_duration = float(end - start)
+            if sticker_duration < 4.0:
+                continue
+            sticker_time = float(start)
 
-        # Guard: don't exceed total duration
-        if sticker_time + sticker_duration > total_render_duration:
-            continue
+            # Guard: don't exceed total duration
+            if sticker_time + sticker_duration > total_render_duration:
+                continue
 
-        # Position from Visual Director blueprint, with safe defaults
-        default_x = "75%" if sticker_idx % 2 == 0 else "25%"
+            # Position from Visual Director blueprint, with safe defaults
+            default_x = "75%" if sticker_idx % 2 == 0 else "25%"
 
-        # Sticker track: 4 for both modes
-        sticker_el = {
-            "type": "image",
-            "track": 4,
-            "time": sticker_time,
-            "duration": sticker_duration,
-            "x": overlay.get("x", default_x),
-            "y": overlay.get("y", "60%"),
-            "width": overlay.get("width", "25%"),
-            "height": overlay.get("height", "25%"),
-            "source": prompt,
-            "provider": "openai model=gpt-image-1.5",
-            "dynamic": True,
-            "border_radius": 50,
-            "opacity": "85%",
-            "animations": [
-                _build_sticker_anim(overlay.get("sticker_enter_animation", "fade"), is_exit=False),
-                _build_sticker_anim(overlay.get("sticker_exit_animation", "fade"), is_exit=True),
-            ],
-        }
-        elements.append(sticker_el)
-        sticker_idx += 1
+            # Sticker track: 4 for both modes
+            sticker_el = {
+                "type": "image",
+                "track": 4,
+                "time": sticker_time,
+                "duration": sticker_duration,
+                "x": overlay.get("x", default_x),
+                "y": overlay.get("y", "60%"),
+                "width": overlay.get("width", "25%"),
+                "height": overlay.get("height", "25%"),
+                "source": prompt,
+                "provider": "openai model=gpt-image-1.5",
+                "dynamic": True,
+                "border_radius": 50,
+                "opacity": "85%",
+                "animations": [
+                    _build_sticker_anim(overlay.get("sticker_enter_animation", "fade"), is_exit=False),
+                    _build_sticker_anim(overlay.get("sticker_exit_animation", "fade"), is_exit=True),
+                ],
+            }
+            elements.append(sticker_el)
+            sticker_idx += 1
 
     return elements, transition_count
 
@@ -328,6 +435,7 @@ class CreatomateService:
         hybrid_voiceover_url: str | None = None,
         voiceover_segments: list[dict] | None = None,
         per_clip_voiceover_url: str | None = None,
+        font_family: str = "Montserrat",
     ) -> dict:
         """
         Build Creatomate source JSON (elements + metadata).
@@ -456,7 +564,7 @@ class CreatomateService:
                                 "y": "78%",
                                 "x_alignment": "50%",
                                 "y_alignment": "50%",
-                                "font_family": "Montserrat",
+                                "font_family": font_family,
                                 "font_weight": "700",
                                 "font_size": "6 vmin",
                                 "stroke_color": "#000000",
@@ -488,7 +596,7 @@ class CreatomateService:
                         "y": "78%",
                         "x_alignment": "50%",
                         "y_alignment": "50%",
-                        "font_family": "Montserrat",
+                        "font_family": font_family,
                         "font_weight": "700",
                         "font_size": "6 vmin",
                         "stroke_color": "#000000",
@@ -563,7 +671,7 @@ class CreatomateService:
                                     "y": "78%",
                                     "x_alignment": "50%",
                                     "y_alignment": "50%",
-                                    "font_family": "Montserrat",
+                                    "font_family": font_family,
                                     "font_weight": "700",
                                     "font_size": "6 vmin",
                                     "stroke_color": "#000000",
@@ -612,7 +720,7 @@ class CreatomateService:
                             "y": "78%",
                             "x_alignment": "50%",
                             "y_alignment": "50%",
-                            "font_family": "Montserrat",
+                            "font_family": font_family,
                             "font_weight": "700",
                             "font_size": "6 vmin",
                             "stroke_color": "#000000",
@@ -662,7 +770,7 @@ class CreatomateService:
                     "y": "78%",
                     "x_alignment": "50%",
                     "y_alignment": "50%",
-                    "font_family": "Montserrat",
+                    "font_family": font_family,
                     "font_weight": "700",
                     "font_size": "6 vmin",
                     "stroke_color": "#000000",

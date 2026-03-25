@@ -162,7 +162,8 @@ async def storyboard_render(
     await update_progress(status_msg, 3, "Gemini анализирует видео + озвучку...")
 
     item = await supabase_service.get_item(item_id)
-    scenario_text = item.get("script", "") if item else ""
+    raw_scenario = item.get("script", "") if item else ""
+    scenario_text, style_params = _parse_style_params(raw_scenario)
 
     gemini = GeminiService()
     analysis = await gemini.analyze_storyboard(
@@ -244,11 +245,21 @@ async def storyboard_render(
         if any(descs):
             clip_descriptions = descs
 
+    anchors = select_overlay_anchors(
+        clips=clips,
+        whisper_words=None,
+        clip_descriptions=clip_descriptions,
+        sticker_count=style_params.get("sticker_count", 2) if style_params else 2,
+        total_duration=sum(c.trim_duration for c in clips),
+    )
+
     blueprint = await get_visual_blueprint(
         scenario_text=scenario_text,
         clips=clips_info,
         render_mode="storyboard",
         clip_descriptions=clip_descriptions,
+        style_params=style_params,
+        anchors=anchors if anchors else None,
     )
 
     logger.info(
@@ -257,6 +268,8 @@ async def storyboard_render(
         blueprint.get("reasoning", "n/a"),
     )
     logger.debug("Visual blueprint: %s", blueprint)
+
+    anchored_overlays = _merge_anchors_into_overlays(blueprint.get("overlays", []), anchors)
 
     # ── Step 5: Build source, apply blueprint, audio compensation ──
     await update_progress(status_msg, 3, "Запускаю рендер...")
@@ -279,11 +292,14 @@ async def storyboard_render(
             quality=quality,
             voiceover_url=voiceover_signed,
             voiceover_duration=processed_duration,
+            font_family=blueprint.get("font_family", "Montserrat"),
         )
 
         source["elements"], transition_count = apply_visual_blueprint(
             source["elements"], blueprint,
             [c.trim_duration for c in clips],
+            anchored_overlays=anchored_overlays if anchored_overlays else None,
+            clips=clips if anchored_overlays else None,
         )
 
         # Audio compensation: voiceover may be longer than video timeline
@@ -740,6 +756,178 @@ class ScriptEdit(StatesGroup):
     pasting_ready = State()
 
 
+def _parse_style_params(text: str) -> tuple[str, dict]:
+    """Extract sticker style/quantity params from end of scenario_text.
+
+    Returns (clean_text, params_dict). Params are stripped from text
+    so Gemini doesn't see them as part of the script.
+    """
+    import re
+    params = {}
+    clean = text
+
+    m = re.search(r'sticker\s+style:?\s*(\w+)', clean, re.IGNORECASE)
+    if m:
+        params["sticker_style"] = m.group(1).lower()
+        clean = clean[:m.start()] + clean[m.end():]
+
+    m = re.search(r'sticker\s+quantity:?\s*(\d+)', clean, re.IGNORECASE)
+    if m:
+        count = int(m.group(1))
+        params["sticker_count"] = min(count, 5)
+        clean = clean[:m.start()] + clean[m.end():]
+
+    # Clean up trailing separators/whitespace
+    clean = re.sub(r'[,.\s]+$', '', clean.strip())
+
+    return clean, params
+
+
+def select_overlay_anchors(
+    clips: list,
+    whisper_words: dict[str, list[dict]] | None,
+    clip_descriptions: list[str] | None = None,
+    sticker_count: int = 2,
+    total_duration: float = 0.0,
+) -> list[dict]:
+    """Select N anchor points from speech/content for sticker placement.
+
+    Returns: [{"anchor_id": "anchor_0", "phrase": str, "audio_time": float, "clip_index": int}]
+    """
+    if sticker_count <= 0:
+        return []
+
+    # Cap sticker count for short reels
+    if total_duration > 0 and total_duration < 10:
+        sticker_count = min(sticker_count, 1)
+
+    anchors: list[dict] = []
+
+    if whisper_words:
+        # ── With Whisper words (talking_head): pick content-rich words ──
+        all_words: list[tuple[dict, int]] = []  # (word_dict, clip_index)
+        for i, clip in enumerate(clips):
+            if clip.clip_type != "speech":
+                continue
+            words = whisper_words.get(str(clip.video_index), [])
+            trim_end = clip.trim_start + clip.trim_duration
+            clip_words = [
+                w for w in words
+                if w["start"] >= clip.trim_start and w["start"] < trim_end
+            ]
+            for w in clip_words:
+                all_words.append((w, i))
+
+        if all_words:
+            # Score: longer words score higher (content words tend to be longer)
+            scored = []
+            for w, ci in all_words:
+                text = w["word"].strip()
+                score = len(text) * (1.2 if clips[ci].clip_type == "speech" else 1.0)
+                scored.append((score, w, ci))
+            scored.sort(key=lambda x: -x[0])
+
+            # Select with spacing and diversity constraints
+            selected: list[tuple[dict, int]] = []
+            clip_counts: dict[int, int] = {}
+            min_spacing = max(5.0, total_duration / (sticker_count + 1) * 0.5) if total_duration > 0 else 5.0
+
+            for _score, w, ci in scored:
+                if len(selected) >= sticker_count:
+                    break
+                # Max 2 anchors per clip
+                if clip_counts.get(ci, 0) >= 2:
+                    continue
+                # Spacing check
+                too_close = False
+                for sel_w, _sel_ci in selected:
+                    if abs(w["start"] - sel_w["start"]) < min_spacing:
+                        too_close = True
+                        break
+                if too_close:
+                    continue
+                selected.append((w, ci))
+                clip_counts[ci] = clip_counts.get(ci, 0) + 1
+
+            # Build anchors with phrase context
+            for idx, (w, ci) in enumerate(selected):
+                # Find neighboring words for phrase context
+                words_in_clip = whisper_words.get(str(clips[ci].video_index), [])
+                w_idx = next((j for j, ww in enumerate(words_in_clip) if ww["start"] == w["start"]), -1)
+                phrase_words = []
+                if w_idx >= 0:
+                    start_j = max(0, w_idx - 1)
+                    end_j = min(len(words_in_clip), w_idx + 2)
+                    phrase_words = [words_in_clip[j]["word"].strip() for j in range(start_j, end_j)]
+                phrase = " ".join(phrase_words) if phrase_words else w["word"].strip()
+
+                anchors.append({
+                    "anchor_id": f"anchor_{idx}",
+                    "phrase": phrase,
+                    "audio_time": w["start"],
+                    "clip_index": ci,
+                })
+        else:
+            # No speech words found — fall through to description-based
+            whisper_words = None
+
+    if not whisper_words and clip_descriptions:
+        # ── Without Whisper (storyboard fallback): use clip descriptions ──
+        n = min(sticker_count, len(clips))
+        stride = max(1, len(clips) // n) if n > 0 else 1
+        for idx in range(n):
+            ci = min(idx * stride, len(clips) - 1)
+            clip = clips[ci]
+            phrase = clip_descriptions[ci] if ci < len(clip_descriptions) else f"clip {ci}"
+            anchors.append({
+                "anchor_id": f"anchor_{idx}",
+                "phrase": phrase,
+                "audio_time": clip.trim_start + clip.trim_duration / 2,
+                "clip_index": ci,
+            })
+
+    if not anchors and total_duration > 0:
+        # ── No data at all: distribute evenly ──
+        for idx in range(sticker_count):
+            t = (idx + 1) * total_duration / (sticker_count + 1)
+            # Map to nearest clip
+            cumul = 0.0
+            best_ci = 0
+            for ci, clip in enumerate(clips):
+                if cumul + clip.trim_duration > t:
+                    best_ci = ci
+                    break
+                cumul += clip.trim_duration
+            else:
+                best_ci = len(clips) - 1
+            anchors.append({
+                "anchor_id": f"anchor_{idx}",
+                "phrase": "",
+                "audio_time": t,
+                "clip_index": best_ci,
+            })
+
+    logger.info("select_overlay_anchors: %d anchors selected", len(anchors))
+    for a in anchors:
+        logger.debug("  anchor=%s clip=%d time=%.2f phrase=%r", a["anchor_id"], a["clip_index"], a["audio_time"], a["phrase"][:40])
+
+    return anchors
+
+
+def _merge_anchors_into_overlays(
+    overlays: list[dict],
+    anchors: list[dict],
+) -> list[dict]:
+    """Attach anchor timing data (audio_time, clip_index) to Visual Director overlays.
+
+    The overlays already have anchor data merged during validation (when anchors are provided),
+    so this is a no-op passthrough. Kept for explicit data flow clarity.
+    """
+    # When anchors-based validation is used, _validate_blueprint already merges
+    # audio_time and clip_index into each overlay. Just pass through.
+    return overlays
+
+
 def _parse_mmss(mmss: str) -> float:
     """Convert 'MM:SS' or 'MM:SS.s' to seconds."""
     parts = mmss.split(":")
@@ -815,37 +1003,40 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
     from app.services.visual_director import get_visual_blueprint
     from app.services.creatomate_service import apply_visual_blueprint
 
-    script_text = item.get("script", "")
+    raw_script = item.get("script", "")
+    script_text, style_params = _parse_style_params(raw_script)
     clips_info = [
         {"index": i, "duration": clip.trim_duration}
         for i, clip in enumerate(clips)
     ]
 
-    logger.debug("clip_descriptions for Visual Director: %s", clip_descriptions)
-    blueprint = await get_visual_blueprint(
-        scenario_text=script_text,
-        clips=clips_info,
-        render_mode="talking_head",
-        clip_descriptions=clip_descriptions,
-    )
+    # Build per-clip context: speech clips get Whisper text, broll keeps Gemini description
+    clip_contexts = None
+    if whisper_words:
+        clip_contexts = []
+        for i, clip in enumerate(clips):
+            ctx = {
+                "clip_type": clip.clip_type,
+                "clip_description": clip_descriptions[i] if clip_descriptions and i < len(clip_descriptions) else None,
+                "speech_text": None,
+            }
+            if clip.clip_type == "speech":
+                vi_key = str(clip.video_index)
+                words = whisper_words.get(vi_key, [])
+                clip_words = [
+                    w for w in words
+                    if w["start"] >= clip.trim_start
+                    and w["start"] < clip.trim_start + clip.trim_duration
+                ]
+                if clip_words:
+                    ctx["speech_text"] = " ".join(w["word"] for w in clip_words)
+            clip_contexts.append(ctx)
 
-    logger.info(
-        "Visual style: %s, reason: %s",
-        blueprint["overall_style"],
-        blueprint.get("reasoning", "n/a"),
-    )
-    logger.debug("Visual blueprint: %s", blueprint)
+    logger.debug("clip_descriptions for Visual Director: %s", clip_descriptions)
 
     creatomate = CreatomateService()
     quality_label = "🧪 Dev (720p)" if quality == "dev" else "🚀 Prod (1080p)"
     logger.debug("[Render] video_format=%r, music_mood=%r, clips=%d, quality=%s", video_format, music_mood, len(clips), quality)
-    # Extract transition offsets from blueprint for subtitle sync
-    transition_durations = []
-    if blueprint and "clips" in blueprint:
-        for j, clip_bp in enumerate(blueprint.get("clips", [])):
-            t = clip_bp.get("transition")
-            clip_dur = clips[j].trim_duration if j < len(clips) else 0
-            transition_durations.append(0.5 if t and clip_dur >= 2.5 else 0.0)
 
     # ── Hybrid mode: per-clip voiceover for talking_head ──
     voiceover_segments = None
@@ -910,6 +1101,47 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
                 clip.trim_duration -= shift
                 logger.info("Speech trim adjusted: video %d, shifted trim_start %.1f → %.1f (first word at %.1fs)", clip.video_index, old_start, clip.trim_start, first_word["start"])
 
+    # ── Visual Director + anchor-based stickers (AFTER speech trim) ──
+    # Rebuild clips_info with post-trim durations
+    clips_info = [
+        {"index": i, "duration": clip.trim_duration}
+        for i, clip in enumerate(clips)
+    ]
+    anchors = select_overlay_anchors(
+        clips=clips,
+        whisper_words=whisper_words,
+        clip_descriptions=clip_descriptions,
+        sticker_count=style_params.get("sticker_count", 2) if style_params else 2,
+        total_duration=sum(c.trim_duration for c in clips),
+    )
+
+    blueprint = await get_visual_blueprint(
+        scenario_text=script_text,
+        clips=clips_info,
+        render_mode="talking_head",
+        clip_descriptions=clip_descriptions,
+        clip_contexts=clip_contexts,
+        style_params=style_params,
+        anchors=anchors if anchors else None,
+    )
+
+    logger.info(
+        "Visual style: %s, reason: %s",
+        blueprint["overall_style"],
+        blueprint.get("reasoning", "n/a"),
+    )
+    logger.debug("Visual blueprint: %s", blueprint)
+
+    anchored_overlays = _merge_anchors_into_overlays(blueprint.get("overlays", []), anchors)
+
+    # Extract transition offsets from blueprint for subtitle sync
+    transition_durations = []
+    if blueprint and "clips" in blueprint:
+        for j, clip_bp in enumerate(blueprint.get("clips", [])):
+            t = clip_bp.get("transition")
+            clip_dur = clips[j].trim_duration if j < len(clips) else 0
+            transition_durations.append(0.5 if t and clip_dur >= 2.5 else 0.0)
+
     try:
         source = creatomate.build_source(
             clips=clips,
@@ -922,11 +1154,14 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
             transition_durations=transition_durations,
             voiceover_segments=voiceover_segments,
             per_clip_voiceover_url=signed_voiceover_url,
+            font_family=blueprint.get("font_family", "Montserrat"),
         )
 
         source["elements"], _ = apply_visual_blueprint(
             source["elements"], blueprint,
             [c.trim_duration for c in clips],
+            anchored_overlays=anchored_overlays if anchored_overlays else None,
+            clips=clips if anchored_overlays else None,
         )
 
         render_id = await creatomate.submit_render(source, webhook_url)
