@@ -8,6 +8,7 @@ from app.services import supabase_service
 from app.bot import messages
 
 import logging
+import re
 
 logger = logging.getLogger(__name__)
 
@@ -245,12 +246,17 @@ async def storyboard_render(
         if any(descs):
             clip_descriptions = descs
 
-    anchors = select_overlay_anchors(
+    # Build candidate spans (storyboard has no whisper_words → empty → legacy fallback)
+    sticker_count = style_params.get("sticker_count", 2) if style_params else 2
+    total_dur = sum(c.trim_duration for c in clips)
+    candidate_spans = []  # No whisper_words in storyboard mode
+
+    anchors = _legacy_select_anchors(
         clips=clips,
         whisper_words=None,
         clip_descriptions=clip_descriptions,
-        sticker_count=style_params.get("sticker_count", 2) if style_params else 2,
-        total_duration=sum(c.trim_duration for c in clips),
+        sticker_count=sticker_count,
+        total_duration=total_dur,
     )
 
     blueprint = await get_visual_blueprint(
@@ -783,7 +789,210 @@ def _parse_style_params(text: str) -> tuple[str, dict]:
     return clean, params
 
 
-def select_overlay_anchors(
+def _build_candidate_spans(
+    whisper_words: dict[str, list[dict]],
+    clips: list,
+) -> list[dict]:
+    """Build candidate spans from Whisper word timestamps for semantic sticker selection.
+
+    Splits words into spans by pauses (>0.4s) and punctuation, merges short adjacent
+    spans within the same clip, drops spans < 1.0s or < 3 words.
+
+    Returns: [{"id": 1, "start": 0.5, "end": 4.2, "text": "...", "clip_id": 0, "word_count": 5}]
+    """
+    if not whisper_words:
+        return []
+
+    # Collect all words with their clip index, filtered to clip trim range
+    raw_spans: list[list[tuple[dict, int]]] = []  # list of spans, each span = list of (word, clip_idx)
+    current_span: list[tuple[dict, int]] = []
+
+    for clip_idx, clip in enumerate(clips):
+        if clip.clip_type != "speech":
+            continue
+        words = whisper_words.get(str(clip.video_index), [])
+        trim_end = clip.trim_start + clip.trim_duration
+        clip_words = [
+            w for w in words
+            if w["start"] >= clip.trim_start and w["start"] < trim_end
+        ]
+
+        for i, w in enumerate(clip_words):
+            if not current_span:
+                current_span.append((w, clip_idx))
+            else:
+                prev_word, prev_clip = current_span[-1]
+                # Split on clip boundary
+                if prev_clip != clip_idx:
+                    raw_spans.append(current_span)
+                    current_span = [(w, clip_idx)]
+                # Split on pause > 0.4s
+                elif w["start"] - prev_word["end"] > 0.4:
+                    raw_spans.append(current_span)
+                    current_span = [(w, clip_idx)]
+                # Split on punctuation at end of previous word
+                elif prev_word["word"].rstrip().endswith((".", "?", "!", ";", ":")):
+                    raw_spans.append(current_span)
+                    current_span = [(w, clip_idx)]
+                else:
+                    current_span.append((w, clip_idx))
+
+    if current_span:
+        raw_spans.append(current_span)
+
+    # Merge adjacent short spans within same clip
+    merged_spans: list[list[tuple[dict, int]]] = []
+    for span in raw_spans:
+        if not merged_spans:
+            merged_spans.append(span)
+            continue
+        prev = merged_spans[-1]
+        prev_clip = prev[0][1]
+        curr_clip = span[0][1]
+        prev_dur = prev[-1][0]["end"] - prev[0][0]["start"]
+        curr_dur = span[-1][0]["end"] - span[0][0]["start"]
+        if prev_clip == curr_clip and (prev_dur + curr_dur) < 1.5:
+            merged_spans[-1] = prev + span
+        else:
+            merged_spans.append(span)
+
+    # Post-merge: split spans > 5s by longest internal pause
+    split_spans: list[list[tuple[dict, int]]] = []
+    for span in merged_spans:
+        if not span:
+            continue
+        duration = span[-1][0]["end"] - span[0][0]["start"]
+        if duration <= 5.0:
+            split_spans.append(span)
+            continue
+
+        # Find longest pause within this span
+        best_gap_idx = -1
+        best_gap = 0.0
+        for j in range(len(span) - 1):
+            gap = span[j + 1][0]["start"] - span[j][0]["end"]
+            if gap > best_gap:
+                best_gap = gap
+                best_gap_idx = j
+
+        if best_gap >= 0.4 and best_gap_idx >= 0:
+            split_spans.append(span[:best_gap_idx + 1])
+            split_spans.append(span[best_gap_idx + 1:])
+        else:
+            # No suitable pause — keep as-is (trigger_phrase handles precision)
+            split_spans.append(span)
+
+    # Build final list, dropping short/thin spans
+    candidates: list[dict] = []
+    span_id = 1
+    for span in split_spans:
+        if not span:
+            continue
+        start = span[0][0]["start"]
+        end = span[-1][0]["end"]
+        duration = end - start
+        word_count = len(span)
+        if duration < 1.0 or word_count < 3:
+            continue
+        text = " ".join(w["word"].strip() for w, _ in span)
+        clip_id = span[0][1]
+        candidates.append({
+            "id": span_id,
+            "start": start,
+            "end": end,
+            "text": text,
+            "clip_id": clip_id,
+            "word_count": word_count,
+        })
+        span_id += 1
+
+    logger.info("_build_candidate_spans: %d spans from %d clips", len(candidates), len(clips))
+    for c in candidates:
+        logger.debug("  span id=%d clip=%d [%.1f-%.1f] %dw: %s", c["id"], c["clip_id"], c["start"], c["end"], c["word_count"], c["text"][:50])
+
+    return candidates
+
+
+def _normalize_word(w: str) -> str:
+    """Lowercase, strip punctuation for fuzzy matching."""
+    return re.sub(r'[^\w]', '', w.lower())
+
+
+def _resolve_trigger_phrases(
+    overlays: list[dict],
+    anchors: list[dict],
+    whisper_words: dict[str, list[dict]],
+    clips: list,
+) -> list[dict]:
+    """Resolve trigger_phrase to precise Whisper timestamps.
+
+    For each anchor with a trigger_phrase, find the word sequence in Whisper data
+    and update audio_time to the first matched word's start time.
+    """
+    if not whisper_words or not anchors:
+        return anchors
+
+    anchor_map = {a["anchor_id"]: a for a in anchors}
+
+    # Build anchor_id → trigger_phrase from overlays
+    trigger_map: dict[str, str] = {}
+    for ov in overlays:
+        aid = str(ov.get("anchor_id", ""))
+        tp = ov.get("trigger_phrase", "")
+        if aid and tp:
+            trigger_map[aid] = tp
+
+    for anchor_id, trigger_phrase in trigger_map.items():
+        if anchor_id not in anchor_map:
+            continue
+        anchor = anchor_map[anchor_id]
+        span_start = anchor["audio_time"]
+        span_end = anchor.get("span_end", span_start + 10)
+        clip_idx = anchor["clip_index"]
+
+        clip = clips[clip_idx] if clip_idx < len(clips) else None
+        if not clip:
+            continue
+        words = whisper_words.get(str(clip.video_index), [])
+
+        # Filter to span range
+        span_words = [w for w in words if span_start <= w["start"] <= span_end]
+        if not span_words:
+            continue
+
+        trigger_words = [_normalize_word(tw) for tw in trigger_phrase.split() if _normalize_word(tw)]
+        if not trigger_words:
+            continue
+
+        # Sequential search for trigger_words in span_words
+        found_start = None
+        for i in range(len(span_words) - len(trigger_words) + 1):
+            match = True
+            for j, tw in enumerate(trigger_words):
+                if _normalize_word(span_words[i + j]["word"]) != tw:
+                    match = False
+                    break
+            if match:
+                found_start = span_words[i]["start"]
+                break
+
+        if found_start is not None:
+            old_time = anchor["audio_time"]
+            anchor["audio_time"] = found_start
+            logger.debug(
+                "Trigger '%s' → audio_time %.2f (was %.2f)",
+                trigger_phrase, found_start, old_time,
+            )
+        else:
+            logger.debug(
+                "Trigger '%s' not found in span [%.1f-%.1f], keeping audio_time=%.2f",
+                trigger_phrase, span_start, span_end, anchor["audio_time"],
+            )
+
+    return anchors
+
+
+def _legacy_select_anchors(
     clips: list,
     whisper_words: dict[str, list[dict]] | None,
     clip_descriptions: list[str] | None = None,
@@ -907,7 +1116,7 @@ def select_overlay_anchors(
                 "clip_index": best_ci,
             })
 
-    logger.info("select_overlay_anchors: %d anchors selected", len(anchors))
+    logger.info("_legacy_select_anchors: %d anchors selected", len(anchors))
     for a in anchors:
         logger.debug("  anchor=%s clip=%d time=%.2f phrase=%r", a["anchor_id"], a["clip_index"], a["audio_time"], a["phrase"][:40])
 
@@ -918,13 +1127,19 @@ def _merge_anchors_into_overlays(
     overlays: list[dict],
     anchors: list[dict],
 ) -> list[dict]:
-    """Attach anchor timing data (audio_time, clip_index) to Visual Director overlays.
+    """Sync anchor timing data (audio_time, clip_index) into Visual Director overlays.
 
-    The overlays already have anchor data merged during validation (when anchors are provided),
-    so this is a no-op passthrough. Kept for explicit data flow clarity.
+    _validate_blueprint bakes initial audio_time into overlays, but _resolve_trigger_phrases
+    may shift audio_time later. This propagates the updated values.
     """
-    # When anchors-based validation is used, _validate_blueprint already merges
-    # audio_time and clip_index into each overlay. Just pass through.
+    if not anchors:
+        return overlays
+    anchor_map = {str(a["anchor_id"]): a for a in anchors}
+    for ov in overlays:
+        aid = str(ov.get("anchor_id", ""))
+        if aid in anchor_map:
+            ov["audio_time"] = anchor_map[aid]["audio_time"]
+            ov["clip_index"] = anchor_map[aid]["clip_index"]
     return overlays
 
 
@@ -1107,23 +1322,73 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
         {"index": i, "duration": clip.trim_duration}
         for i, clip in enumerate(clips)
     ]
-    anchors = select_overlay_anchors(
-        clips=clips,
-        whisper_words=whisper_words,
-        clip_descriptions=clip_descriptions,
-        sticker_count=style_params.get("sticker_count", 2) if style_params else 2,
-        total_duration=sum(c.trim_duration for c in clips),
-    )
+    sticker_count = style_params.get("sticker_count", 2) if style_params else 2
+    total_dur = sum(c.trim_duration for c in clips)
 
-    blueprint = await get_visual_blueprint(
-        scenario_text=script_text,
-        clips=clips_info,
-        render_mode="talking_head",
-        clip_descriptions=clip_descriptions,
-        clip_contexts=clip_contexts,
-        style_params=style_params,
-        anchors=anchors if anchors else None,
-    )
+    # Build candidate spans from Whisper words for semantic selection
+    candidate_spans = _build_candidate_spans(whisper_words, clips) if whisper_words else []
+
+    if candidate_spans:
+        # New path: Director selects from candidates by semantics
+        anchors = None
+        blueprint = await get_visual_blueprint(
+            scenario_text=script_text,
+            clips=clips_info,
+            render_mode="talking_head",
+            clip_descriptions=clip_descriptions,
+            clip_contexts=clip_contexts,
+            style_params=style_params,
+            candidate_spans=candidate_spans,
+        )
+
+        # Build anchors from Director's selected span IDs
+        if blueprint.get("overlays"):
+            span_map = {s["id"]: s for s in candidate_spans}
+            anchors = []
+            for ov in blueprint["overlays"]:
+                sid = ov.get("anchor_id")
+                # Parse as int — Director returns int IDs
+                if isinstance(sid, str) and sid.isdigit():
+                    sid = int(sid)
+                if sid and sid in span_map:
+                    s = span_map[sid]
+                    anchors.append({
+                        "anchor_id": str(sid),
+                        "phrase": s["text"],
+                        "audio_time": s["start"],
+                        "clip_index": s["clip_id"],
+                        "span_end": s["end"],
+                    })
+            logger.info("Candidate selection: Director picked %d/%d spans", len(anchors), len(candidate_spans))
+
+            # Resolve trigger phrases to precise Whisper timestamps
+            if anchors and whisper_words:
+                anchors = _resolve_trigger_phrases(
+                    overlays=blueprint.get("overlays", []),
+                    anchors=anchors,
+                    whisper_words=whisper_words,
+                    clips=clips,
+                )
+        else:
+            anchors = []
+    else:
+        # Fallback: legacy anchor selection
+        anchors = _legacy_select_anchors(
+            clips=clips,
+            whisper_words=whisper_words,
+            clip_descriptions=clip_descriptions,
+            sticker_count=sticker_count,
+            total_duration=total_dur,
+        )
+        blueprint = await get_visual_blueprint(
+            scenario_text=script_text,
+            clips=clips_info,
+            render_mode="talking_head",
+            clip_descriptions=clip_descriptions,
+            clip_contexts=clip_contexts,
+            style_params=style_params,
+            anchors=anchors if anchors else None,
+        )
 
     logger.info(
         "Visual style: %s, reason: %s",
@@ -1132,7 +1397,7 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
     )
     logger.debug("Visual blueprint: %s", blueprint)
 
-    anchored_overlays = _merge_anchors_into_overlays(blueprint.get("overlays", []), anchors)
+    anchored_overlays = _merge_anchors_into_overlays(blueprint.get("overlays", []), anchors or [])
 
     # Extract transition offsets from blueprint for subtitle sync
     transition_durations = []

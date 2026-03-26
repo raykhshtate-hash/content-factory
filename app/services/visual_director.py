@@ -15,7 +15,7 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-sonnet-4-6"
+MODEL = "claude-opus-4-6"
 
 ALLOWED_TRANSITION_TYPES = {
     "fade", "slide", "wipe", "circular-wipe", "color-wipe",
@@ -341,6 +341,7 @@ def _validate_blueprint(
     clip_durations: list[float],
     max_stickers: int = DEFAULT_MAX_STICKERS,
     anchors: list[dict] | None = None,
+    candidate_spans: list[dict] | None = None,
 ) -> dict | None:
     """Validate blueprint. Returns cleaned blueprint or None if invalid."""
     clips = blueprint.get("clips")
@@ -375,11 +376,75 @@ def _validate_blueprint(
     raw_overlays = blueprint.get("overlays") or []
     clean_overlays = []
 
-    if anchors is not None:
+    if candidate_spans is not None:
+        # Candidate-based validation: Claude selected span IDs from candidates
+        valid_ids = {s["id"] for s in candidate_spans}
+        span_map = {s["id"]: s for s in candidate_spans}
+        seen_ids: set[int] = set()
+
+        for ov_i, ov in enumerate(raw_overlays):
+            if not isinstance(ov, dict):
+                continue
+            raw_id = ov.get("anchor_id")
+            # Parse as int — Director returns int IDs
+            if isinstance(raw_id, str) and raw_id.isdigit():
+                raw_id = int(raw_id)
+            if not raw_id or raw_id not in valid_ids:
+                logger.debug("Overlay %d rejected: unknown span id=%r", ov_i, raw_id)
+                continue
+            if raw_id in seen_ids:
+                logger.debug("Overlay %d rejected: duplicate span id=%r", ov_i, raw_id)
+                continue
+            prompt = ov.get("image_prompt", "")
+            if not prompt:
+                continue
+            if len(clean_overlays) >= max_stickers:
+                break
+
+            # Clamp duration 2-8s (tighter than legacy anchor mode)
+            dur = ov.get("duration_seconds", 4)
+            dur = max(2, min(8, int(dur) if isinstance(dur, (int, float)) else 4))
+
+            enter_anim = ov.get("sticker_enter_animation", "fade")
+            exit_anim = ov.get("sticker_exit_animation", "fade")
+            if enter_anim not in ALLOWED_STICKER_ANIMATIONS:
+                enter_anim = "fade"
+            if exit_anim not in ALLOWED_STICKER_ANIMATIONS:
+                exit_anim = "fade"
+
+            idx = len(clean_overlays)
+            default_x = "75%" if idx % 2 == 0 else "25%"
+            x_val = _parse_pct(ov.get("x", default_x), 15, 85, default_x)
+            y_val = _parse_pct(ov.get("y", "60%"), 10, 90, "60%")
+            w_val = _parse_pct(ov.get("width", "25%"), 10, 40, "25%")
+            h_val = _parse_pct(ov.get("height", "25%"), 10, 40, "25%")
+
+            # Merge span timing data for downstream use
+            span_data = span_map[raw_id]
+            clean_overlays.append({
+                "type": "ai_image",
+                "anchor_id": raw_id,
+                "image_prompt": prompt[:200],
+                "duration_seconds": dur,
+                "audio_time": span_data["start"],
+                "clip_index": span_data["clip_id"],
+                "span_end": span_data["end"],
+                "trigger_phrase": ov.get("trigger_phrase", ""),
+                "sticker_enter_animation": enter_anim,
+                "sticker_exit_animation": exit_anim,
+                "x": x_val,
+                "y": y_val,
+                "width": w_val,
+                "height": h_val,
+            })
+            seen_ids.add(raw_id)
+            logger.debug("Overlay %d accepted (candidate): id=%d prompt=%r dur=%d", ov_i, raw_id, prompt[:50], dur)
+
+    elif anchors is not None:
         # Anchor-based validation: Claude returns anchor_id + image_prompt + duration_seconds
         valid_ids = {a["anchor_id"] for a in anchors}
         anchor_map = {a["anchor_id"]: a for a in anchors}
-        seen_ids: set[str] = set()
+        seen_ids_str: set[str] = set()
 
         for ov_i, ov in enumerate(raw_overlays):
             if not isinstance(ov, dict):
@@ -388,7 +453,7 @@ def _validate_blueprint(
             if not anchor_id or anchor_id not in valid_ids:
                 logger.debug("Overlay %d rejected: unknown anchor_id=%r", ov_i, anchor_id)
                 continue
-            if anchor_id in seen_ids:
+            if anchor_id in seen_ids_str:
                 logger.debug("Overlay %d rejected: duplicate anchor_id=%r", ov_i, anchor_id)
                 continue
             prompt = ov.get("image_prompt", "")
@@ -431,7 +496,7 @@ def _validate_blueprint(
                 "width": w_val,
                 "height": h_val,
             })
-            seen_ids.add(anchor_id)
+            seen_ids_str.add(anchor_id)
             logger.debug("Overlay %d accepted (anchor): id=%s prompt=%r dur=%d", ov_i, anchor_id, prompt[:50], dur)
     else:
         # Legacy timeline-based validation
@@ -530,6 +595,7 @@ async def get_visual_blueprint(
     clip_contexts: list[dict] | None = None,
     style_params: dict | None = None,
     anchors: list[dict] | None = None,
+    candidate_spans: list[dict] | None = None,
 ) -> dict:
     """
     Call Claude to choose transitions + sticker overlays + font.
@@ -542,6 +608,8 @@ async def get_visual_blueprint(
     :param style_params: Optional dict with sticker_style, sticker_count overrides.
     :param anchors: Optional anchor points [{anchor_id, phrase, clip_index, audio_time}].
                     When provided, Claude receives anchors instead of choosing timing.
+    :param candidate_spans: Optional candidate spans for semantic sticker selection.
+                           When provided, Claude selects best spans from candidates.
     :return: Blueprint dict with overall_style, font_family, reasoning, clips[].transition, overlays[]
     """
     num_clips = len(clips)
@@ -619,14 +687,59 @@ async def get_visual_blueprint(
     total_duration = sum(clip_durations)
     scenario_part = f"Сценарий:\n{scenario_text}\n\n" if scenario_text else ""
 
-    # Build anchor block for user prompt (when anchor-based mode)
+    # Build anchor/candidate block for user prompt
     anchor_block = ""
-    if anchors:
+    use_candidate_mode = candidate_spans is not None and len(candidate_spans) > 0
+
+    if use_candidate_mode:
+        # Candidate-based mode: Claude selects best spans by semantics
+        span_lines = []
+        for s in candidate_spans:
+            span_lines.append(f'- ID {s["id"]}: [{s["start"]:.1f}-{s["end"]:.1f}s] Клип {s["clip_id"]}: "{s["text"]}"')
+
+        target_count = max_stickers
+
+        anchor_block = (
+            f"\n\nCANDIDATE SPANS ({len(candidate_spans)} кандидатов для стикеров):\n"
+            + "\n".join(span_lines)
+            + f"\n\nВыбери ровно {target_count} лучших моментов для стикеров из списка выше."
+            "\nВерни ТОЛЬКО существующие id из candidates. Запрещено придумывать новые timestamps или фразы."
+            "\nВыбирай КРЮЧКИ, ПАНЧЛАЙНЫ и ЭМОЦИОНАЛЬНЫЕ ПИКИ — не длинные описательные фразы."
+            "\nВыбирай моменты с пиковой энергией: хук (интрига в начале), контраст (сравнение стран/культур), "
+            "конкретная рекомендация (совет зрителю), punchline (шутка, неожиданный вывод)."
+            "\nПропускай долины: переходы между темами, самопрезентация, обоснования, бэкграунд."
+            "\nЕсли есть рекомендация или punchline — не трать стикер на bridge."
+            "\nДля каждого верни: anchor_id (= ID кандидата), image_prompt, duration_seconds (3-5с), trigger_phrase, _reasoning."
+            "\ntrigger_phrase = точная цитата 2-6 ПОСЛЕДОВАТЕЛЬНЫХ слов из текста этого span. "
+            "Это момент ВНУТРИ span когда стикер должен появиться — крючок, панч или пик. "
+            "Пример: span 'Особенно напряжённым можно сделать ботокс фулл фейс а некоторым целый душ из ботокса' "
+            "→ trigger_phrase 'душ из ботокса'."
+            "\nВ _reasoning напиши: роль фразы, отвергнутый образ, стилистическая линза, почему выбрал эту длительность."
+        )
+
+        # Replace overlay response format for candidate mode
+        prompt_text = prompt_text.replace(
+            '"start_second": 5,\n      "end_second": 14,',
+            '"duration_seconds": 4,\n      "trigger_phrase": "душ из ботокса",\n      "_reasoning": "крючок — вызывает интерес, отвергнут шприц (банально), стиль: юмор",',
+        )
+        prompt_text = prompt_text.replace(
+            '      "type": "ai_image",\n'
+            '      "image_prompt": "A skincare serum bottle, isolated object, sticker style, no background",\n'
+            '      "start_second": 5,\n'
+            '      "end_second": 14,',
+            '      "anchor_id": 1,\n'
+            '      "type": "ai_image",\n'
+            '      "image_prompt": "A skincare serum bottle, isolated object, sticker style, no background",\n'
+            '      "duration_seconds": 4,\n'
+            '      "trigger_phrase": "душ из ботокса",\n'
+            '      "_reasoning": "крючок — вызывает интерес, отвергнут шприц (банально), стиль: юмор",',
+        )
+
+    elif anchors:
+        # Legacy anchor-based mode
         anchor_lines = []
         for a in anchors:
             clip_idx = a["clip_index"]
-            clip_type = "speech" if clip_idx < len(clips) else "unknown"
-            # Try to determine clip type from clip_contexts or default
             phrase = a.get("phrase", "")
             anchor_lines.append(f"- {a['anchor_id']}: Клип {clip_idx}, фраза: \"{phrase}\"")
         anchor_block = (
@@ -662,10 +775,10 @@ async def get_visual_blueprint(
     )
 
     try:
-        client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=30.0)
+        client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=60.0)
         message = await client.messages.create(
             model=MODEL,
-            max_tokens=1024,
+            max_tokens=2048,
             temperature=0,
             system=prompt_text,
             messages=[{"role": "user", "content": user_prompt}],
@@ -687,7 +800,10 @@ async def get_visual_blueprint(
             text = text[start:end + 1]
 
         blueprint = json.loads(text)
-        validated = _validate_blueprint(blueprint, num_clips, clip_durations, max_stickers, anchors=anchors)
+        validated = _validate_blueprint(
+            blueprint, num_clips, clip_durations, max_stickers,
+            anchors=anchors, candidate_spans=candidate_spans if use_candidate_mode else None,
+        )
         if validated is None:
             logger.warning("Visual blueprint validation failed, using fallback")
             return _make_fallback(num_clips)

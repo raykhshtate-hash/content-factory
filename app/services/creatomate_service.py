@@ -211,6 +211,11 @@ def resolve_overlay_render_times(
         else:
             render_time = clip_render_starts[clip_index] + (audio_time - adjusted_trim_start)
 
+        # Anticipate: start sticker before trigger phrase so it's fully
+        # visible when the phrase is spoken. 1.0s = max enter animation
+        # duration (0.5s) + 0.5s notice time for the viewer.
+        render_time = max(0.3, render_time - 1.0)
+
         candidates.append((render_time, float(duration_seconds), ov))
 
     # Sort by render_time
@@ -222,19 +227,27 @@ def resolve_overlay_render_times(
 
     for i, (render_time, requested_duration, ov) in enumerate(candidates):
         # Safe start margin
-        if render_time < 2.0:
-            logger.debug("resolve_overlay: render_time %.2f < 2s, skipping", render_time)
+        if render_time < 0.3:
+            logger.debug("resolve_overlay: render_time %.2f < 0.3s, skipping", render_time)
             continue
 
+        # Smart Duration Clamp: span-aware when span_end available
+        span_end = ov.get("span_end")
+        if span_end is not None:
+            span_duration = span_end - ov.get("audio_time", span_end)
+            duration = min(requested_duration, max(span_duration + 0.3, 2.0), 5.0)
+        else:
+            duration = min(requested_duration, 5.0)
+
         # Safe end margin
-        duration = min(requested_duration, total_render_duration - render_time - 2.0)
+        duration = min(duration, total_render_duration - render_time - 0.5)
 
         # Pre-cap: ensure 0.5s gap before next sticker
         if i + 1 < len(candidates):
             next_render_time = candidates[i + 1][0]
             duration = min(duration, next_render_time - render_time - 0.5)
 
-        if duration < 1.5:
+        if duration < 1.0:
             logger.debug("resolve_overlay: duration %.2f < 1.5s after caps, skipping", duration)
             continue
 
@@ -843,6 +856,12 @@ class CreatomateService:
 
         Returns render_id (str) on success, raises on failure.
         """
+        # Log sticker elements (track 4) at INFO for debugging
+        sticker_count = sum(1 for el in source.get("elements", []) if el.get("track") == 4)
+        logger.info("submit_render: %d elements total, %d stickers (track 4)", len(source.get("elements", [])), sticker_count)
+        for el in source.get("elements", []):
+            if el.get("track") == 4:
+                logger.info("  sticker: time=%.2f dur=%.2f src=%s", el.get("time", 0), el.get("duration", 0), el.get("source", "")[:80])
         logger.debug("Creatomate source payload:\n%s", json.dumps(source, indent=2))
 
         api_key = settings.CREATOMATE_API_KEY
