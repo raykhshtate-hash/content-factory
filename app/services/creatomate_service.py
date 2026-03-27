@@ -54,7 +54,7 @@ KARAOKE_STYLES: dict[str, dict] = {
     "energetic": {
         "fill_color": "#FFFFFF",
         "transcript_color": "#FF3232",
-        "font_weight": "800",
+        "font_weight": "700",
         "stroke_color": "#000000",
         "stroke_width": "2 vmin",
     },
@@ -68,7 +68,7 @@ KARAOKE_STYLES: dict[str, dict] = {
     "humor": {
         "fill_color": "#FFFFFF",
         "transcript_color": "#FFE600",
-        "font_weight": "800",
+        "font_weight": "600",
         "stroke_color": "#000000",
         "stroke_width": "2.5 vmin",
     },
@@ -82,21 +82,21 @@ KARAOKE_STYLES: dict[str, dict] = {
     "upbeat": {
         "fill_color": "#FFFFFF",
         "transcript_color": "#FF6B9D",
-        "font_weight": "700",
+        "font_weight": "600",
         "stroke_color": "#000000",
         "stroke_width": "2 vmin",
     },
     "dramatic": {
         "fill_color": "#FFFFFF",
         "transcript_color": "#FF4444",
-        "font_weight": "700",
+        "font_weight": "600",
         "stroke_color": "#000000",
         "stroke_width": "2 vmin",
     },
     "funny": {
         "fill_color": "#FFFFFF",
         "transcript_color": "#FFE600",
-        "font_weight": "800",
+        "font_weight": "600",
         "stroke_color": "#000000",
         "stroke_width": "2.5 vmin",
     },
@@ -262,7 +262,7 @@ def resolve_overlay_render_times(
             "width": ov.get("width", "25%"),
             "height": ov.get("height", "25%"),
             "source": ov.get("image_prompt", ""),
-            "provider": "openai model=gpt-image-1.5",
+            "provider": "openai model=gpt-image-1.5 background=transparent",
             "dynamic": True,
             "border_radius": 50,
             "opacity": "85%",
@@ -376,7 +376,7 @@ def apply_visual_blueprint(
                 "width": overlay.get("width", "25%"),
                 "height": overlay.get("height", "25%"),
                 "source": prompt,
-                "provider": "openai model=gpt-image-1.5",
+                "provider": "openai model=gpt-image-1.5 background=transparent",
                 "dynamic": True,
                 "border_radius": 50,
                 "opacity": "85%",
@@ -420,7 +420,7 @@ class CreatomateService:
     #             "width": "25%",
     #             "height": "25%",
     #             "source": prompt,
-    #             "provider": "openai model=gpt-image-1.5",
+    #             "provider": "openai model=gpt-image-1.5 background=transparent",
     #             "dynamic": True,
     #             "fit": "cover",
     #             "border_radius": 50,
@@ -449,6 +449,7 @@ class CreatomateService:
         voiceover_segments: list[dict] | None = None,
         per_clip_voiceover_url: str | None = None,
         font_family: str = "Montserrat",
+        subtitle_color: str | None = None,
     ) -> dict:
         """
         Build Creatomate source JSON (elements + metadata).
@@ -496,10 +497,31 @@ class CreatomateService:
                 running += td
                 cumulative_offsets.append(running)
 
+        # Detect talking_head with transitions: same source, has transitions, no voiceover.
+        # Audio must be decoupled to a separate track to prevent doubling during overlap.
+        is_same_source_transitions = (
+            not voiceover_url
+            and not voiceover_segments
+            and transition_durations is not None
+            and any(td > 0 for td in (transition_durations or []))
+            and len(set(c.source for c in clips)) == 1
+        )
+        adjusted_durations_list: list[float] = []   # for audio element construction
+        adjusted_trim_starts_list: list[float] = []
+
         for i, clip in enumerate(clips):
             clip_name = f"clip-{i}"
 
-            adjusted_trim_start = max(0, clip.trim_start - 0.5)
+            # Pre-buffer: start clip slightly earlier to avoid abrupt word cuts.
+            # For same-source clips (talking_head), limit to the gap between clips
+            # so we never replay source audio the previous clip already covered.
+            if i > 0 and clips[i - 1].source == clip.source:
+                prev_end = clips[i - 1].trim_start + clips[i - 1].trim_duration
+                gap = max(0, clip.trim_start - prev_end)
+                prebuffer = min(0.5, gap)
+            else:
+                prebuffer = 0.5
+            adjusted_trim_start = max(0, clip.trim_start - prebuffer)
             adjusted_duration = clip.trim_duration + (clip.trim_start - adjusted_trim_start)
 
             video_el = {
@@ -515,7 +537,9 @@ class CreatomateService:
                 "duration": adjusted_duration,
             }
 
-            if voiceover_url:
+            if is_same_source_transitions:
+                video_el["volume"] = "0%"  # Audio decoupled to track 2
+            elif voiceover_url:
                 video_el["volume"] = "0%"
             elif voiceover_segments and clip.matched_voiceover_segment is not None:
                 video_el["volume"] = "0%"  # Per-clip: voiceover replaces broll ambient
@@ -525,6 +549,8 @@ class CreatomateService:
                 video_el["volume"] = "70%"
 
             elements.append(video_el)
+            adjusted_durations_list.append(adjusted_duration)
+            adjusted_trim_starts_list.append(adjusted_trim_start)
 
             if karaoke and not voiceover_url and clip.clip_type != "broll":
                 if use_whisper_karaoke:
@@ -587,6 +613,8 @@ class CreatomateService:
                             # transcript_color is for native karaoke only; use it as fill_color for popup text
                             if "transcript_color" in text_el:
                                 text_el["fill_color"] = text_el.pop("transcript_color")
+                            if subtitle_color:
+                                text_el["fill_color"] = subtitle_color
                             logger.debug(
                                 "Popup phrase: text=%r time=%.3f dur=%.3f | clip_trim=%.2f adj_trim=%.2f cur_time=%.2f phrase_start=%.2f clip_end=%.2f",
                                 phrase["text"][:20], phrase_time, phrase_dur,
@@ -616,6 +644,8 @@ class CreatomateService:
                         "stroke_width": "1.6 vmin",
                     }
                     karaoke_el.update(style)
+                    if subtitle_color:
+                        karaoke_el["fill_color"] = subtitle_color
                     karaoke_elements.append(karaoke_el)
 
             # ── Per-clip voiceover audio + karaoke (new hybrid per-clip mode) ──
@@ -693,6 +723,8 @@ class CreatomateService:
                                 text_el.update(style)
                                 if "transcript_color" in text_el:
                                     text_el["fill_color"] = text_el.pop("transcript_color")
+                                if subtitle_color:
+                                    text_el["fill_color"] = subtitle_color
                                 karaoke_elements.append(text_el)
                             logger.info(
                                 "[VO Karaoke] clip=%d, phrases=%d, first='%s' at %.2f",
@@ -742,6 +774,8 @@ class CreatomateService:
                         text_el.update(style)
                         if "transcript_color" in text_el:
                             text_el["fill_color"] = text_el.pop("transcript_color")
+                        if subtitle_color:
+                            text_el["fill_color"] = subtitle_color
                         logger.debug(
                             "Broll karaoke: text=%r time=%.3f dur=%.3f | broll_start=%.2f broll_end=%.2f",
                             phrase["text"][:20], phrase_time, phrase_dur,
@@ -750,6 +784,43 @@ class CreatomateService:
                         karaoke_elements.append(text_el)
 
             current_time += adjusted_duration
+
+        # ── Decoupled audio track for talking_head with transitions ────
+        # Audio on track 2 with explicit time positioning, no overlap.
+        # Cut at transition midpoints so audio switches cleanly.
+        if is_same_source_transitions:
+            render_starts = [0.0]
+            for idx in range(1, len(clips)):
+                td = transition_durations[idx] if idx < len(transition_durations) else 0
+                render_starts.append(render_starts[-1] + adjusted_durations_list[idx - 1] - td)
+
+            for idx in range(len(clips)):
+                # Outgoing clip loses its tail (0.5s max) — less noticeable than
+                # losing speech beginning. Incoming clip keeps full audio start.
+                audio_time = render_starts[idx]
+
+                if idx < len(clips) - 1:
+                    audio_end = render_starts[idx + 1]  # stop when next clip starts
+                else:
+                    audio_end = render_starts[idx] + adjusted_durations_list[idx]
+
+                audio_dur = audio_end - audio_time
+                audio_el = {
+                    "type": "audio",
+                    "track": 2,
+                    "source": clips[idx].source,
+                    "time": round(audio_time, 3),
+                    "trim_start": round(adjusted_trim_starts_list[idx], 3),
+                    "trim_duration": round(audio_dur, 3),
+                    "volume": "100%",
+                    "audio_fade_in": 0.03,
+                    "audio_fade_out": 0.03,
+                }
+                elements.append(audio_el)
+                logger.info(
+                    "[TH audio] clip=%d time=%.3f trim=%.3f dur=%.3f",
+                    idx, audio_time, audio_el["trim_start"], audio_dur,
+                )
 
         total_duration = current_time
         # Subtract total transition overlap to match actual Creatomate timeline
@@ -790,6 +861,8 @@ class CreatomateService:
                     "stroke_width": "1.6 vmin",
                 }
                 vo_karaoke.update(style)
+                if subtitle_color:
+                    vo_karaoke["fill_color"] = subtitle_color
                 elements.append(vo_karaoke)
         elif voiceover_segments and per_clip_voiceover_url:
             # Per-clip hybrid mode: audio elements already added in clip loop

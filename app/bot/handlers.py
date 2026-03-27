@@ -159,6 +159,16 @@ async def storyboard_render(
             f"Аудио обработано: {processed_duration:.0f}с (ускорение {speedup:.1f}x)."
         )
 
+    # ── Step 2b: Whisper transcribe voiceover for candidate spans ──
+    voiceover_whisper = None
+    try:
+        vo_signed = await asyncio.to_thread(gcs_service.generate_presigned_url, processed_uri)
+        voiceover_whisper = await whisper.transcribe_url_with_timestamps(vo_signed)
+        if voiceover_whisper:
+            logger.info("Voiceover Whisper: %d words transcribed", len(voiceover_whisper))
+    except Exception as e:
+        logger.warning("Whisper voiceover transcription failed: %s — stickers will use legacy anchors", e)
+
     # ── Step 3: Gemini storyboard analysis ──
     await update_progress(status_msg, 3, "Gemini анализирует видео + озвучку...")
 
@@ -246,27 +256,81 @@ async def storyboard_render(
         if any(descs):
             clip_descriptions = descs
 
-    # Build candidate spans (storyboard has no whisper_words → empty → legacy fallback)
+    # Build candidate spans from Whisper voiceover words
     sticker_count = style_params.get("sticker_count", 2) if style_params else 2
     total_dur = sum(c.trim_duration for c in clips)
-    candidate_spans = []  # No whisper_words in storyboard mode
 
-    anchors = _legacy_select_anchors(
-        clips=clips,
-        whisper_words=None,
-        clip_descriptions=clip_descriptions,
-        sticker_count=sticker_count,
-        total_duration=total_dur,
-    )
+    # Set clip metadata for _build_candidate_spans compatibility
+    for idx, clip in enumerate(clips):
+        clip.clip_type = "speech"
+        clip.video_index = idx + 1
 
-    blueprint = await get_visual_blueprint(
-        scenario_text=scenario_text,
-        clips=clips_info,
-        render_mode="storyboard",
-        clip_descriptions=clip_descriptions,
-        style_params=style_params,
-        anchors=anchors if anchors else None,
-    )
+    whisper_words_for_spans = {}
+    if voiceover_whisper and analysis and hasattr(analysis, "scenes"):
+        for idx, clip in enumerate(clips):
+            scene = analysis.scenes[idx] if idx < len(analysis.scenes) else None
+            if scene:
+                clip_words = [
+                    w for w in voiceover_whisper
+                    if scene.audio_start <= w["start"] < scene.audio_end
+                ]
+                if clip_words:
+                    whisper_words_for_spans[str(idx + 1)] = clip_words
+        logger.info("Whisper words mapped to %d/%d clips", len(whisper_words_for_spans), len(clips))
+
+    candidate_spans = _build_candidate_spans(whisper_words_for_spans, clips) if whisper_words_for_spans else []
+
+    model_name = "claude-opus-4-6" if quality == "prod" else "claude-sonnet-4-6"
+    logger.info("Visual Director model: %s (quality=%s)", model_name, quality)
+
+    if candidate_spans:
+        # Semantic sticker selection via candidate spans
+        blueprint = await get_visual_blueprint(
+            scenario_text=scenario_text,
+            clips=clips_info,
+            render_mode="storyboard",
+            clip_descriptions=clip_descriptions,
+            style_params=style_params,
+            candidate_spans=candidate_spans,
+            model_name=model_name,
+        )
+
+        # Build anchors from Director's selected span IDs
+        anchors = []
+        if blueprint.get("overlays"):
+            span_map = {s["id"]: s for s in candidate_spans}
+            for ov in blueprint["overlays"]:
+                sid = ov.get("anchor_id")
+                if isinstance(sid, str) and sid.isdigit():
+                    sid = int(sid)
+                if sid and sid in span_map:
+                    s = span_map[sid]
+                    anchors.append({
+                        "anchor_id": str(sid),
+                        "phrase": s["text"],
+                        "audio_time": s["start"],
+                        "clip_index": s["clip_id"],
+                        "span_end": s["end"],
+                    })
+            logger.info("Candidate selection: Director picked %d/%d spans", len(anchors), len(candidate_spans))
+    else:
+        # Legacy fallback: no Whisper data → description-based anchors
+        anchors = _legacy_select_anchors(
+            clips=clips,
+            whisper_words=None,
+            clip_descriptions=clip_descriptions,
+            sticker_count=sticker_count,
+            total_duration=total_dur,
+        )
+        blueprint = await get_visual_blueprint(
+            scenario_text=scenario_text,
+            clips=clips_info,
+            render_mode="storyboard",
+            clip_descriptions=clip_descriptions,
+            style_params=style_params,
+            anchors=anchors if anchors else None,
+            model_name=model_name,
+        )
 
     logger.info(
         "Visual style: %s, reason: %s",
@@ -275,7 +339,7 @@ async def storyboard_render(
     )
     logger.debug("Visual blueprint: %s", blueprint)
 
-    anchored_overlays = _merge_anchors_into_overlays(blueprint.get("overlays", []), anchors)
+    anchored_overlays = _merge_anchors_into_overlays(blueprint.get("overlays", []), anchors or [])
 
     # ── Step 5: Build source, apply blueprint, audio compensation ──
     await update_progress(status_msg, 3, "Запускаю рендер...")
@@ -299,6 +363,7 @@ async def storyboard_render(
             voiceover_url=voiceover_signed,
             voiceover_duration=processed_duration,
             font_family=blueprint.get("font_family", "Montserrat"),
+            subtitle_color=blueprint.get("subtitle_color"),
         )
 
         source["elements"], transition_count = apply_visual_blueprint(
@@ -461,8 +526,10 @@ async def cmd_ready(message: types.Message):
             logger.warning("Multiple audio files in storyboard, using first: %s", sb_audio[0]['name'])
 
         sb_videos.sort(key=lambda f: f['name'])
+        numbered = all(re.match(r'^\d', f['name']) for f in sb_videos)
+        storyboard_submode = "ordered" if numbered else "smart"
         all_files = sb_videos + [sb_audio[0]]  # audio LAST — important for URI split later
-        source_label = "storyboard"
+        source_label = f"storyboard/{storyboard_submode}"
     else:
         # talking_head: check for optional voiceover audio
         th_audio = [f for f in th_files if f['name'].lower().endswith(AUDIO_EXT)]
@@ -526,12 +593,32 @@ async def cmd_ready(message: types.Message):
             voiceover_gcs_uri = None
 
     # Phase update
-    if is_storyboard:
+    if is_storyboard and storyboard_submode == "smart":
+        # Smart storyboard: route through talking_head pipeline (Whisper + Gemini analysis)
+        try:
+            await supabase_service.update_item(
+                item_id,
+                status="analyzing",
+                content_mode="storyboard",
+                analysis_mode="smart",
+                gcs_uris=video_gcs_uris,
+                voiceover_gcs_uri=voiceover_gcs_uri,
+            )
+        except Exception:
+            await supabase_service.update_item(
+                item_id, status="analyzing", content_mode="storyboard",
+            )
+
+        await analyze_and_propose(message.chat.id, item_id, video_gcs_uris, status_msg)
+
+    elif is_storyboard:
+        # Ordered storyboard: existing flow (quality buttons → storyboard_render)
         try:
             await supabase_service.update_item(
                 item_id,
                 status="ready_for_storyboard",
                 content_mode="storyboard",
+                analysis_mode="ordered",
                 gcs_uris=video_gcs_uris,
                 voiceover_gcs_uri=voiceover_gcs_uri,
             )
@@ -553,7 +640,7 @@ async def cmd_ready(message: types.Message):
             )],
         ])
         await status_msg.edit_text(
-            "🎬 Storyboard mode! Выбери качество:",
+            "🎬 Storyboard (ordered)! Выбери качество:",
             reply_markup=keyboard,
         )
     else:
@@ -735,13 +822,12 @@ async def analyze_and_propose(chat_id: int, item_id: str, gcs_uris: list[str], s
         f"🎬 Кандидатов: {len(analysis.clip_candidates)}\n"
         f"{risks_warning}\n"
         f"{music_recommendation}\n\n"
-        f"Выбери дальнейший шаг:"
+        f"Выбери качество рендера:"
     )
-    
+
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Рекомендация 🎯", callback_data=f"render:recommendation:{item_id}")],
-        [InlineKeyboardButton(text="Выбрать свои 🎬", callback_data=f"render:custom:{item_id}")],
-        [InlineKeyboardButton(text="Без анализа ⚡", callback_data=f"render:skip:{item_id}")]
+        [InlineKeyboardButton(text="🧪 Тест (720p)", callback_data=f"render:recommendation:{item_id}:dev")],
+        [InlineKeyboardButton(text="🚀 Продакшн (1080p)", callback_data=f"render:recommendation:{item_id}:prod")],
     ])
     
     try:
@@ -1144,9 +1230,25 @@ def _merge_anchors_into_overlays(
 
 
 def _parse_mmss(mmss: str) -> float:
-    """Convert 'MM:SS' or 'MM:SS.s' to seconds."""
+    """Convert 'MM:SS' or 'MM:SS.s' to seconds.
+
+    Gemini sometimes omits the leading 00: and writes e.g. '10:26.0'
+    meaning 10.26 seconds — NOT 10 min 26 sec.  For Reels-length content
+    (source videos ≤ ~90 s) a parsed value > 120 s is physically impossible,
+    so we re-interpret the colon as a decimal point.
+    """
     parts = mmss.split(":")
-    return int(parts[0]) * 60 + float(parts[1])
+    result = int(parts[0]) * 60 + float(parts[1])
+    if result > 120:
+        # Likely SS:fractional, not MM:SS — e.g. "10:26.0" means 10.26s
+        # Treat parts[0] as whole seconds, parts[1] as fractional
+        reinterpreted = float(parts[0]) + float(parts[1]) / 100
+        logger.warning(
+            "Timestamp %r parsed as %.1fs (> 120s) — re-interpreted as %.1fs",
+            mmss, result, reinterpreted,
+        )
+        result = reinterpreted
+    return result
 
 
 async def _candidates_to_clips(candidates, gcs_uris: list[str], gcs_service: GCSService) -> list[Clip]:
@@ -1253,11 +1355,18 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
     quality_label = "🧪 Dev (720p)" if quality == "dev" else "🚀 Prod (1080p)"
     logger.debug("[Render] video_format=%r, music_mood=%r, clips=%d, quality=%s", video_format, music_mood, len(clips), quality)
 
-    # ── Hybrid mode: per-clip voiceover for talking_head ──
+    # ── Smart storyboard: force all clips to broll (mute video, voiceover replaces) ──
+    content_mode = item.get("content_mode", "talking_head")
+    if content_mode == "storyboard":
+        for clip in clips:
+            clip.clip_type = "broll"
+        logger.info("Smart storyboard: forced %d clips to broll", len(clips))
+
+    # ── Hybrid mode: per-clip voiceover for talking_head + smart storyboard ──
     voiceover_segments = None
     signed_voiceover_url = None
     th_voiceover_gcs_uri = item.get("voiceover_gcs_uri")
-    if th_voiceover_gcs_uri and item.get("content_mode") == "talking_head":
+    if th_voiceover_gcs_uri and content_mode in ("talking_head", "storyboard"):
         # Extract voiceover segments from analysis data (saved by analyze_and_propose)
         voiceover_segments = analysis_data.get("voiceover_segments") if analysis_data else None
 
@@ -1307,6 +1416,9 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
                 logger.warning("Speech trim check: video %d [%.1f-%.1f] — no Whisper words", clip.video_index, clip.trim_start, trim_end)
                 continue
             first_word = clip_words[0]
+            last_word = clip_words[-1]
+
+            # Trim START: skip silence before first word
             gap = first_word["start"] - clip.trim_start
             if gap > 1.0:
                 old_start = clip.trim_start
@@ -1314,9 +1426,21 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
                 shift = new_start - clip.trim_start
                 clip.trim_start = new_start
                 clip.trim_duration -= shift
-                logger.info("Speech trim adjusted: video %d, shifted trim_start %.1f → %.1f (first word at %.1fs)", clip.video_index, old_start, clip.trim_start, first_word["start"])
+                logger.info("Speech trim start: video %d, %.1f → %.1f (first word at %.1fs)", clip.video_index, old_start, clip.trim_start, first_word["start"])
+
+            # Trim END: cap at last spoken word + 1s buffer
+            last_word_end = last_word["end"] if "end" in last_word else last_word["start"] + 0.5
+            ideal_end = last_word_end + 1.0
+            current_end = clip.trim_start + clip.trim_duration
+            if current_end > ideal_end + 2.0:
+                old_dur = clip.trim_duration
+                clip.trim_duration = max(1.0, ideal_end - clip.trim_start)
+                logger.info("Speech trim end: video %d, duration %.1f → %.1f (last word at %.1fs)", clip.video_index, old_dur, clip.trim_duration, last_word_end)
 
     # ── Visual Director + anchor-based stickers (AFTER speech trim) ──
+    model_name = "claude-opus-4-6" if quality == "prod" else "claude-sonnet-4-6"
+    logger.info("Visual Director model: %s (quality=%s)", model_name, quality)
+
     # Rebuild clips_info with post-trim durations
     clips_info = [
         {"index": i, "duration": clip.trim_duration}
@@ -1328,17 +1452,20 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
     # Build candidate spans from Whisper words for semantic selection
     candidate_spans = _build_candidate_spans(whisper_words, clips) if whisper_words else []
 
+    vd_render_mode = "storyboard" if content_mode == "storyboard" else "talking_head"
+
     if candidate_spans:
         # New path: Director selects from candidates by semantics
         anchors = None
         blueprint = await get_visual_blueprint(
             scenario_text=script_text,
             clips=clips_info,
-            render_mode="talking_head",
+            render_mode=vd_render_mode,
             clip_descriptions=clip_descriptions,
             clip_contexts=clip_contexts,
             style_params=style_params,
             candidate_spans=candidate_spans,
+            model_name=model_name,
         )
 
         # Build anchors from Director's selected span IDs
@@ -1383,11 +1510,12 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
         blueprint = await get_visual_blueprint(
             scenario_text=script_text,
             clips=clips_info,
-            render_mode="talking_head",
+            render_mode=vd_render_mode,
             clip_descriptions=clip_descriptions,
             clip_contexts=clip_contexts,
             style_params=style_params,
             anchors=anchors if anchors else None,
+            model_name=model_name,
         )
 
     logger.info(
@@ -1420,6 +1548,7 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
             voiceover_segments=voiceover_segments,
             per_clip_voiceover_url=signed_voiceover_url,
             font_family=blueprint.get("font_family", "Montserrat"),
+            subtitle_color=blueprint.get("subtitle_color"),
         )
 
         source["elements"], _ = apply_visual_blueprint(

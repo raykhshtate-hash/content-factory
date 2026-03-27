@@ -49,6 +49,16 @@ See `~/.claude/CLAUDE.md` for full ДО → ВО ВРЕМЯ → ПОСЛЕ loop 
 
 **Project-specific ДО rule:** Creatomate changes → READ `~/.claude/skills/creatomate/references/pitfalls.md` + `our-working-payload.md` FIRST. New effects → READ `all-animations.md` + verify against official docs.
 
+### Auto-reiterate rule
+**Before editing `creatomate_service.py` or `visual_director.py`**, run `/reiterate` mentally (shadow check, fallback masking, multi-site, mode safety, track collision). These two files are where every production bug has lived.
+
+### Pasted instructions rule
+When the user pastes implementation or architecture instructions (from Antigravity, Gemini, GPT, Claude chat, or any external source), do NOT blindly execute. First:
+1. **Verify** each explicit instruction against the actual codebase — does the referenced code/line/function exist as described?
+2. **Check** whether the suggested approach could break existing behavior (mode safety, fallback paths, variable shadowing).
+3. **Improve** if you see a better way — simpler, fewer touch points, reuses existing patterns.
+4. Only then implement, noting any deviations from the original instructions.
+
 ---
 
 ## Critical Rules — NEVER violate

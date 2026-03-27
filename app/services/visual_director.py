@@ -15,7 +15,6 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-opus-4-6"
 
 ALLOWED_TRANSITION_TYPES = {
     "fade", "slide", "wipe", "circular-wipe", "color-wipe",
@@ -146,44 +145,57 @@ storyboard → свободнее, y: 15-70%.
 
 === КРЕАТИВНЫЕ ПРАВИЛА СТИКЕРОВ ===
 
-Стикер — это НЕ иллюстрация к кадру. Стикер визуализирует \
-ОЩУЩЕНИЕ зрителя от того что он видит.
+Стикер УСИЛИВАЕТ момент. Он берёт чувство из кадра и делает его \
+ярче, кинематографичнее, крупнее чем жизнь.
 
-Принцип: посмотри на кадр глазами зрителя. Что он думает? \
-Что чувствует? Какая ассоциация возникает? ЭТО и рисуй. \
-Удиви — покажи реакцию зрителя, не содержание кадра. \
-Как будто зритель шлёт подруге стикер в чат со словами \
-"ну ты видела это?!"
+Принцип: представь самый ЯРКИЙ образ который мгновенно передаёт \
+суть момента. Как кадр из фильма, который все помнят. \
+Не описание — а усиление.
 
-ЗАПРЕЩЕНО: рисовать то что уже в кадре или предмет из той же \
-категории. В кадре лапша — рисуешь стикер лапши? Зритель и так \
-её видит! Покажи то чего он НЕ видит но чувствует.
+### ТРИ ЗОНЫ (КРИТИЧНО)
 
-### СЕМАНТИКА СТИКЕРОВ (КРИТИЧНО)
-НИКОГДА не иллюстрируй слова спикера буквально. Стикер добавляет \
-НОВЫЙ визуальный слой: метафора, культура, ирония, гипербола, персонаж.
-Алгоритм: найди самый очевидный образ → ОТВЕРГНИ ЕГО → найди \
-ассоциацию второго порядка → запиши.
-Отвергай стикер если он выражает ту же идею что спикер уже сказал.
-Чередуй типы ассоциаций — не злоупотребляй животными или маскотами.
+СКУЧНОЕ (отвергай): банальные иконки без характера. \
+Часы, лампочка, палец вверх, вопросительный знак, сердечко, \
+стрелка, галочка. Это эмодзи, не стикеры.
 
-ПЛОХО (буквально) → ХОРОШО (креативно):
-- Речь про острую еду → ПЛОХО: перец → ХОРОШО: \
+ЯРКОЕ (цель): конкретный, узнаваемый образ с характером и \
+эмоцией. Мгновенно понятно к чему. Может быть метафора, \
+гипербола, культурная отсылка — но всегда СВЯЗАН с темой.
+
+ОТОРВАННОЕ (отвергай): абстрактные символы без связи с темой. \
+Если зритель не поймёт почему этот стикер здесь — он плохой. \
+Хрустальный шар для темы зубов? Нет. Зубная фея? Да.
+
+### АЛГОРИТМ
+1. Пойми СУТЬ момента (не отдельное слово — весь контекст)
+2. Найди самый ЯРКИЙ образ который усиливает эту суть
+3. Проверь: зритель за 1 секунду поймёт связь? Да → бери. Нет → ищи другой.
+4. НЕ рисуй то что уже видно в кадре (дублирование)
+5. Чередуй типы: метафора, гипербола, культура, персонаж, ирония
+
+ПРИМЕРЫ:
+- В Дубае жарко и всегда хочется пить → \
+"A tiny desert oasis with a single palm tree and sparkling water, \
+isolated object, sticker style, no background" (гипербола места)
+- Зубы могут рассказать о человеке → \
+"A sparkling tooth wearing a tiny golden crown, \
+isolated object, sticker style, no background" (персонификация)
+- Острая еда → \
 "A fire-breathing dragon with smoke from nostrils, \
 isolated object, sticker style, no background" (метафора)
-- Шутка про "душ из ботокса" → ПЛОХО: шприц → ХОРОШО: \
+- "Душ из ботокса" → \
 "A garden watering can pouring golden glitter, \
 isolated object, sticker style, no background" (ирония)
-- Бруксизм в Германии → ПЛОХО: кулак → ХОРОШО: \
+- Бруксизм в Германии → \
 "A steel vise crushing a walnut, \
 isolated object, sticker style, no background" (метафора)
-- Усталость в аэропорту → ПЛОХО: подушка → ХОРОШО: \
+- Усталость в аэропорту → \
 "A sleepy owl hugging a giant coffee cup, \
 isolated object, sticker style, no background" (персонаж)
-- Бюрократическая очередь → ПЛОХО: часы → ХОРОШО: \
+- Бюрократическая очередь → \
 "A tiny snail wearing round reading glasses, \
 isolated object, sticker style, no background" (абсурд)
-- Любовь к сладкому в Израиле → ПЛОХО: конфета → ХОРОШО: \
+- Любовь к сладкому в Израиле → \
 "A piece of baklava dripping with thick golden honey, \
 isolated object, sticker style, no background" (культура)
 
@@ -271,12 +283,34 @@ Sticker overlays:
 - Comfortaa — casual, игривый, округлый
 
 Верни выбранный шрифт в поле font_family.
+
+=== ЦВЕТ СУБТИТРОВ ===
+
+Выбери цвет активного текста субтитров. Не повторяй один цвет — \
+чередуй палитру от видео к видео. Контраст с видео важнее красоты.
+
+Палитра:
+- #FFFFFF — чистый белый (clean, professional)
+- #FFE600 — жёлтый (humor, funny — НЕ используй по умолчанию)
+- #FF6B9D — тёплый розовый (upbeat, женственный)
+- #00E5FF — свежий голубой (свежий, современный)
+- #E0B0FF — лавандовый (soft, нежный)
+- #FF3232 — красный акцент (dramatic, energetic)
+- #7BFFB2 — мятный (chill, свежий)
+- #FFA54F — тёплый оранж (warm, уютный)
+
+Правило: если настроение dynamic/energetic — НЕ бери жёлтый автоматически. \
+Посмотри на контент и выбери цвет который усиливает настроение И \
+отличается от предыдущих видео.
+
+Верни выбранный цвет в поле subtitle_color.
 {style_params_block}
 === ФОРМАТ ОТВЕТА (JSON) ===
 
 {{
   "overall_style": "clean|soft|dynamic|mixed",
   "font_family": "Montserrat|Poppins|Raleway|Comfortaa",
+  "subtitle_color": "#FFFFFF",
   "reasoning": "одно предложение почему выбран этот стиль",
   "clips": [
     {{
@@ -316,6 +350,7 @@ def _make_fallback(num_clips: int) -> dict:
     return {
         "overall_style": "clean",
         "font_family": "Montserrat",
+        "subtitle_color": "#FFFFFF",
         "clips": [
             {"index": i, "transition": None}
             for i in range(num_clips)
@@ -534,8 +569,8 @@ def _validate_blueprint(
                 continue
             # Rule: no overlapping
             overlap = False
-            for rs, re in used_ranges:
-                if start < re and end > rs:
+            for rs, rend in used_ranges:
+                if start < rend and end > rs:
                     overlap = True
                     break
             if overlap:
@@ -576,9 +611,15 @@ def _validate_blueprint(
     if font not in ALLOWED_FONTS:
         font = "Montserrat"
 
+    # Validate subtitle_color
+    sub_color = blueprint.get("subtitle_color", "#FFFFFF")
+    if not re.fullmatch(r"#[0-9A-Fa-f]{6}", sub_color):
+        sub_color = "#FFFFFF"
+
     result = {
         "overall_style": blueprint.get("overall_style", "clean"),
         "font_family": font,
+        "subtitle_color": sub_color,
         "reasoning": blueprint.get("reasoning", ""),
         "clips": cleaned_clips,
         "overlays": clean_overlays,
@@ -596,6 +637,7 @@ async def get_visual_blueprint(
     style_params: dict | None = None,
     anchors: list[dict] | None = None,
     candidate_spans: list[dict] | None = None,
+    model_name: str = "claude-sonnet-4-6",
 ) -> dict:
     """
     Call Claude to choose transitions + sticker overlays + font.
@@ -775,9 +817,10 @@ async def get_visual_blueprint(
     )
 
     try:
+        logger.info("Visual Director model: %s", model_name)
         client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY, timeout=60.0)
         message = await client.messages.create(
-            model=MODEL,
+            model=model_name,
             max_tokens=2048,
             temperature=0,
             system=prompt_text,
