@@ -10,6 +10,9 @@ logging.basicConfig(
 )
 # App-level loggers at DEBUG
 logging.getLogger("app").setLevel(logging.DEBUG)
+
+logger = logging.getLogger(__name__)
+
 from aiogram import Bot, Dispatcher
 
 from app.config import settings
@@ -30,41 +33,41 @@ from fastapi import Request
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # on_startup
-    print("🚀 Starting Content Factory Application...")
-    
+    logger.info("Starting Content Factory Application...")
+
     from app.services.supabase_service import _get_client
     try:
         _get_client()
-        print("✅ Supabase client initialized.")
+        logger.info("Supabase client initialized")
     except Exception as e:
-        print(f"⚠️ Failed to initialize Supabase: {e}")
+        logger.warning("Failed to initialize Supabase: %s", e)
 
     global polling_task
     # K_SERVICE is set automatically by Google Cloud Run.
     # If not set, we assume local development mode -> use polling.
     if not os.getenv("K_SERVICE"):
-        print("🤖 Local dev mode: Starting Telegram Bot polling...")
+        logger.info("Local dev mode: Starting Telegram Bot polling...")
         # Since we're polling locally, make sure to delete any leftover webhooks
         await bot.delete_webhook()
         polling_task = asyncio.create_task(dp.start_polling(bot))
     else:
-        print("☁️ Cloud Run mode: Awaiting Telegram Webhooks...")
+        logger.info("Cloud Run mode: Awaiting Telegram Webhooks...")
 
     yield
 
     # on_shutdown
-    print("🛑 Shutting down Application...")
-    
+    logger.info("Shutting down Application...")
+
     if polling_task:
-        print("💤 Stopping Bot polling...")
+        logger.info("Stopping Bot polling...")
         polling_task.cancel()
         try:
             await polling_task
         except asyncio.CancelledError:
             pass
-    
+
     await bot.session.close()
-    print("👋 Goodbye!")
+    logger.info("Shutdown complete")
 
 # Create FastAPI App
 app = FastAPI(title="Content Factory API", lifespan=lifespan)
@@ -79,12 +82,12 @@ from fastapi import BackgroundTasks
 async def bot_webhook(request: Request, background_tasks: BackgroundTasks):
     from aiogram.types import Update
     data = await request.json()
-    print(f"📥 [Webhook] Received raw update: {data}")
-    
+    logger.debug("[Webhook] Received raw update: %s", data)
+
     try:
         telegram_update = Update(**data)
-        # ⚠️ CRITICAL GCP CLOUD RUN FIX: 
-        # Offload the update processing to FastAPI BackgroundTasks. 
+        # CRITICAL GCP CLOUD RUN FIX:
+        # Offload the update processing to FastAPI BackgroundTasks.
         # This allows the webhook to immediately return 200 OK to Telegram,
         # while FastAPI keeps the request context alive long enough for Gemini (50s).
         # Cloud Run will keep CPU allocated until all background tasks finish
@@ -92,7 +95,7 @@ async def bot_webhook(request: Request, background_tasks: BackgroundTasks):
         background_tasks.add_task(dp.feed_update, bot, telegram_update)
 
     except Exception as e:
-        print(f"❌ [Webhook] Failed to process update: {e}")
+        logger.error("[Webhook] Failed to process update: %s", e)
         
     return {"ok": True}
 

@@ -463,7 +463,7 @@ async def cmd_ready(message: types.Message):
             gcs_uri = await asyncio.to_thread(drive_service.copy_to_gcs, file_id, gcs_bucket, gcs_path)
             gcs_uris.append(gcs_uri)
         except Exception as e:
-            print(f"File copy error for {file_name}: {e}")
+            logger.error("File copy error for %s: %s", file_name, e)
             failed_files.append(file_name)
             continue
         
@@ -471,7 +471,7 @@ async def cmd_ready(message: types.Message):
         try:
             await asyncio.to_thread(drive_service.delete_file, file_id)
         except Exception as e:
-            print(f"File delete warning for {file_name} (non-fatal): {e}")
+            logger.warning("File delete warning for %s (non-fatal): %s", file_name, e)
             
     if not gcs_uris:
         await update_progress(status_msg, 1, f"❌ Не удалось перенести ни одного файла. Ошибок: {len(failed_files)}")
@@ -614,7 +614,7 @@ async def analyze_and_propose(chat_id: int, item_id: str, gcs_uris: list[str], s
             analysis_result=analysis.model_dump() # Сохраняем как словарь (Supabase автоматически конвертирует в JSON)
         )
     except Exception as e:
-        print(f"⚠️ Ошибка при сохранении в БД: {e}")
+        logger.error("DB save error: %s", e)
         
     # Format message
     risks_warning = f"⚠️ Риски: {analysis.visual_risk}" if str(analysis.visual_risk).lower() != "none" else "✅ Рисков нет"
@@ -825,7 +825,7 @@ async def on_storyboard_quality(callback: types.CallbackQuery):
 @router.callback_query(F.data.startswith("render:"))
 async def on_render_callback(callback: types.CallbackQuery, state: FSMContext):
     try:
-        print(f"🎯 [Callback] Received render action: {callback.data}")
+        logger.info("[Callback] Received render action: %s", callback.data)
         parts = callback.data.split(":")
         mode = parts[1]
         item_id = parts[2]
@@ -931,9 +931,7 @@ async def on_render_callback(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer()
 
     except Exception as e:
-        import traceback
-        print(f"❌ [Callback Error] {e}")
-        traceback.print_exc()
+        logger.error("[Callback Error] %s", e, exc_info=True)
         await callback.answer("Произошла ошибка при обработке кнопки.", show_alert=True)
 
 
@@ -1150,7 +1148,7 @@ async def handle_text(message: types.Message):
 @router.callback_query(F.data.startswith("approve:"))
 async def on_approve_video(callback: types.CallbackQuery):
     try:
-        print(f"🎯 [Callback] Received approve action: {callback.data}")
+        logger.info("[Callback] Received approve action: %s", callback.data)
         _, item_id = callback.data.split(":", 1)
         
         await supabase_service.update_item(item_id, status="approved")
@@ -1170,13 +1168,13 @@ async def on_approve_video(callback: types.CallbackQuery):
             
         await callback.answer("Видео одобрено!")
     except Exception as e:
-        print(f"❌ [Callback Error] {e}")
+        logger.error("[Callback Error] approve: %s", e)
 
 
 @router.callback_query(F.data.startswith("reject:"))
 async def on_reject_video(callback: types.CallbackQuery):
     try:
-        print(f"🎯 [Callback] Received reject action: {callback.data}")
+        logger.info("[Callback] Received reject action: %s", callback.data)
         _, item_id = callback.data.split(":", 1)
         
         await supabase_service.update_item(item_id, status="rejected")
@@ -1195,4 +1193,4 @@ async def on_reject_video(callback: types.CallbackQuery):
             
         await callback.answer("Видео отклонено (статус: rejected)")
     except Exception as e:
-        print(f"❌ [Callback Error] {e}")
+        logger.error("[Callback Error] reject: %s", e)
