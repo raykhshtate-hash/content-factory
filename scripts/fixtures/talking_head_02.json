@@ -1,0 +1,21 @@
+{
+  "name": "talking_head_multi_restaurant",
+  "mode": "talking_head",
+  "gcs_uris": [
+    "gs://romina-content-factory-489121/footage/5d8d8cf6-34c9-4ebc-aacc-f648266c03a4/108056df_IMG_7799.MOV",
+    "gs://romina-content-factory-489121/footage/5d8d8cf6-34c9-4ebc-aacc-f648266c03a4/0b6a2024_IMG_7794.MOV",
+    "gs://romina-content-factory-489121/footage/5d8d8cf6-34c9-4ebc-aacc-f648266c03a4/f1eb0e7d_IMG_7804.MOV",
+    "gs://romina-content-factory-489121/footage/5d8d8cf6-34c9-4ebc-aacc-f648266c03a4/d148d2bc_IMG_7803.MOV",
+    "gs://romina-content-factory-489121/footage/5d8d8cf6-34c9-4ebc-aacc-f648266c03a4/3cd227ab_IMG_7793.MOV",
+    "gs://romina-content-factory-489121/footage/5d8d8cf6-34c9-4ebc-aacc-f648266c03a4/4237aaa2_IMG_7795.MOV"
+  ],
+  "scenario_text": "Сходили в китайский ресторан",
+  "audio_map": null,
+  "voiceover_data": null,
+  "expected": {
+    "clip_count": [6, 14],
+    "total_duration": [25, 65]
+  },
+  "threshold_overrides": {},
+  "baseline": null
+}

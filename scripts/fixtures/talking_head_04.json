@@ -1,0 +1,16 @@
+{
+  "name": "talking_head_single_dentist_v2",
+  "mode": "talking_head",
+  "gcs_uris": [
+    "gs://romina-content-factory-489121/footage/36ba7877-03ea-41b8-b9f2-9ae833a96b9e/8d93f9fc_IMG_7858.MOV"
+  ],
+  "scenario_text": "Иногда зубы могут сказать о людях в стране больше, чем сами люди",
+  "audio_map": null,
+  "voiceover_data": null,
+  "expected": {
+    "clip_count": [3, 10],
+    "total_duration": [15, 60]
+  },
+  "threshold_overrides": {},
+  "baseline": null
+}

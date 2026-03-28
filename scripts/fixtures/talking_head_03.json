@@ -1,0 +1,17 @@
+{
+  "name": "talking_head_duo_kids",
+  "mode": "talking_head",
+  "gcs_uris": [
+    "gs://romina-content-factory-489121/footage/abe94d57-1461-41d1-b44c-cd556f363059/1752b220_IMG_8066.MOV",
+    "gs://romina-content-factory-489121/footage/abe94d57-1461-41d1-b44c-cd556f363059/00bc9682_IMG_8065.MOV"
+  ],
+  "scenario_text": "Мирон рассказывает про 3 вещи, которые ему нравятся, и 3 вещи которые не нравятся",
+  "audio_map": null,
+  "voiceover_data": null,
+  "expected": {
+    "clip_count": [4, 12],
+    "total_duration": [20, 60]
+  },
+  "threshold_overrides": {},
+  "baseline": null
+}

@@ -1,0 +1,22 @@
+{
+  "name": "smart_dumplings_3clip_v4",
+  "mode": "storyboard_smart",
+  "gcs_uris": [
+    "gs://romina-content-factory-489121/footage/678e3c9a-3e39-4a39-8e0a-f40f329b255e/7c74d1c4_\u041a\u043e\u043f\u0438\u044f IMG_7793.MOV",
+    "gs://romina-content-factory-489121/footage/678e3c9a-3e39-4a39-8e0a-f40f329b255e/8c0dc179_\u041a\u043e\u043f\u0438\u044f IMG_7795.MOV",
+    "gs://romina-content-factory-489121/footage/678e3c9a-3e39-4a39-8e0a-f40f329b255e/60bbe7f5_\u041a\u043e\u043f\u0438\u044f IMG_7803.MOV"
+  ],
+  "voiceover_gcs_uri": "gs://romina-content-factory-489121/footage/678e3c9a-3e39-4a39-8e0a-f40f329b255e/a0024134_\u041a\u043e\u043f\u0438\u044f voiceover.mp3",
+  "scenario_text": "\u041f\u0435\u043b\u044c\u043c\u0435\u0448\u043a\u0438 \u0432 \u043a\u0438\u0442\u0430\u0439\u0441\u043a\u043e\u043c \u0440\u0435\u0441\u0442\u043e\u0440\u0430\u043d\u0435",
+  "audio_map": null,
+  "voiceover_data": null,
+  "expected": {
+    "clip_count": [2, 8],
+    "total_duration": [8, 30]
+  },
+  "threshold_overrides": {
+    "min_clip_count": 2,
+    "min_duration_s": 8
+  },
+  "baseline": null
+}

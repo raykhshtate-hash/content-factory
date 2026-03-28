@@ -1,0 +1,11 @@
+{
+  "thresholds": {
+    "min_clip_count": 6,
+    "max_clip_count": 14,
+    "min_duration_s": 25,
+    "max_duration_s": 65,
+    "min_dedup_ratio": 0.4,
+    "max_consecutive_same_source": 2,
+    "require_non_linear": true
+  }
+}
