@@ -322,6 +322,7 @@ async def storyboard_render(
             status="rendering",
             creatomate_render_id=render_id,
             selected_clips=[c.__dict__ for c in clips],
+            render_source=source,  # Save for retry (STAB-03)
         )
 
         quality_label = "🧪 Dev (720p)" if quality == "dev" else "🚀 Prod (1080p)"
@@ -761,6 +762,7 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
             status="rendering",
             creatomate_render_id=render_id,
             selected_clips=[c.__dict__ for c in clips],
+            render_source=source,  # Save for retry (STAB-03)
         )
         await callback.message.edit_text(f"🎬 Монтирую ({quality_label})... Пришлю результат когда будет готово.")
 
@@ -1195,3 +1197,61 @@ async def on_reject_video(callback: types.CallbackQuery):
         await callback.answer("Видео отклонено (статус: rejected)")
     except Exception as e:
         print(f"❌ [Callback Error] {e}")
+
+
+# ── Retry Render (STAB-03) ──
+
+@router.callback_query(F.data.startswith("retry_render:"))
+async def on_retry_render(callback: types.CallbackQuery):
+    """Re-submit a failed render to Creatomate using saved source JSON (STAB-03)."""
+    item_id = callback.data.split(":")[1]
+
+    # Idempotency: disable the button
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    await callback.answer("Повторяю рендер...")
+
+    item = await supabase_service.get_item(item_id)
+    if not item:
+        await callback.message.answer("Запись не найдена")
+        return
+
+    # Get saved render source
+    render_source = item.get("render_source")
+    if not render_source:
+        await callback.message.answer(
+            "❌ Не удалось найти данные рендера. Попробуй /ready заново."
+        )
+        return
+
+    # Parse if stored as string
+    if isinstance(render_source, str):
+        render_source = json.loads(render_source)
+
+    # Re-submit to Creatomate
+    webhook_url = f"{settings.BASE_URL}/webhooks/creatomate/{item_id}"
+
+    try:
+        creatomate = CreatomateService()
+        render_id = await creatomate.submit_render(render_source, webhook_url)
+
+        await supabase_service.update_item(
+            item_id,
+            status="rendering",
+            creatomate_render_id=render_id,
+        )
+
+        await callback.message.answer(
+            "🔄 Рендер отправлен повторно. Пришлю результат когда будет готово."
+        )
+        logger.info("Retry render submitted for item %s, new render_id=%s", item_id, render_id)
+
+    except Exception as e:
+        logger.error("Retry render failed for item %s: %s", item_id, e)
+        await supabase_service.update_item(item_id, status="render_failed")
+        await callback.message.answer(
+            "❌ Повторный рендер не удался. Попробуй /ready заново."
+        )
