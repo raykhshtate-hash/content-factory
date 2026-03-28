@@ -19,3 +19,6 @@ class Settings:
     BASE_URL: str = os.getenv("BASE_URL", "")  # public URL for webhooks (e.g. Cloud Run URL)
 
 settings = Settings()
+
+# Gemini prompt version — bump when prompt text changes
+GEMINI_PROMPT_V = "1.1"
