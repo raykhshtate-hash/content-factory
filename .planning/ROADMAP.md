@@ -36,7 +36,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 Plans:
 - [x] 01-01-PLAN.md — Retry logic (Creatomate + Gemini) and print-to-logger migration
 - [x] 01-02-PLAN.md — Cost tracking infrastructure and prompt versioning
-- [ ] 01-03-PLAN.md — Retry render button and cost breakdown delivery
+- [x] 01-03-PLAN.md — Retry render button and cost breakdown delivery
 
 ### Phase 2: Quality Harness, Gemini Polish & Basic Feedback
 **Goal**: Gemini prompt changes are tested against fixtures before deploy, clip selection quality improves, and users can approve or request redo on delivered renders

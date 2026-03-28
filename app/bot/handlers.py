@@ -282,10 +282,11 @@ async def storyboard_render(
 
     model_name = "claude-opus-4-6" if quality == "prod" else "claude-sonnet-4-6"
     logger.info("Visual Director model: %s (quality=%s)", model_name, quality)
+    director_cost = 0.0
 
     if candidate_spans:
         # Semantic sticker selection via candidate spans
-        blueprint = await get_visual_blueprint(
+        blueprint, director_cost = await get_visual_blueprint(
             scenario_text=scenario_text,
             clips=clips_info,
             render_mode="storyboard",
@@ -322,7 +323,7 @@ async def storyboard_render(
             sticker_count=sticker_count,
             total_duration=total_dur,
         )
-        blueprint = await get_visual_blueprint(
+        blueprint, director_cost = await get_visual_blueprint(
             scenario_text=scenario_text,
             clips=clips_info,
             render_mode="storyboard",
@@ -404,12 +405,31 @@ async def storyboard_render(
 
         render_id = await creatomate.submit_render(source, webhook_url)
 
+        # ── Cost aggregation + prompt versioning ──
+        from app.config import GEMINI_PROMPT_V, DIRECTOR_PROMPT_V
+        cost_whisper_val = whisper._last_cost_usd
+        cost_gemini_val = gemini._last_cost_usd
+        cost_creatomate_val = creatomate._last_cost_usd
+        cost_total = cost_whisper_val + cost_gemini_val + director_cost + cost_creatomate_val
+        logger.info(
+            "Storyboard render cost: total=$%.4f (whisper=$%.4f gemini=$%.4f claude=$%.4f creatomate=$%.4f) | versions: gemini=%s director=%s",
+            cost_total, cost_whisper_val, cost_gemini_val, director_cost, cost_creatomate_val,
+            GEMINI_PROMPT_V, DIRECTOR_PROMPT_V,
+        )
+
         await supabase_service.update_item(
             item_id,
             status="rendering",
             creatomate_render_id=render_id,
             selected_clips=[c.__dict__ for c in clips],
             render_source=source,  # Save for retry (STAB-03)
+            cost_whisper=round(cost_whisper_val, 4),
+            cost_gemini=round(cost_gemini_val, 4),
+            cost_claude=round(director_cost, 4),
+            cost_creatomate=round(cost_creatomate_val, 4),
+            cost_total_usd=round(cost_total, 4),
+            gemini_prompt_version=GEMINI_PROMPT_V,
+            director_prompt_version=DIRECTOR_PROMPT_V,
         )
 
         quality_label = "🧪 Dev (720p)" if quality == "dev" else "🚀 Prod (1080p)"
@@ -807,6 +827,8 @@ async def analyze_and_propose(chat_id: int, item_id: str, gcs_uris: list[str], s
             item_id,
             status="ready_for_render",
             analysis_result=result_data,
+            cost_whisper=round(whisper._last_cost_usd, 4),
+            cost_gemini=round(gemini._last_cost_usd, 4),
         )
     except Exception as e:
         logger.error("DB save error: %s", e)
@@ -1672,6 +1694,10 @@ async def on_render_callback(callback: types.CallbackQuery, state: FSMContext):
 
         gcs_service = GCSService()
 
+        # Read pre-saved analysis costs (from analyze_and_propose)
+        analysis_cost_whisper = item.get("cost_whisper") or 0.0
+        analysis_cost_gemini = item.get("cost_gemini") or 0.0
+
         # ── Step 1: If quality not yet chosen, show dev/prod buttons ──
         if quality is None and mode in ("recommendation", "raw", "skip"):
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
@@ -1721,7 +1747,7 @@ async def on_render_callback(callback: types.CallbackQuery, state: FSMContext):
                     )
                     clips.append(Clip(source=signed_url, trim_start=0.0, trim_duration=15.0))
 
-            await _start_render(callback, item, clips, quality=quality)
+            await _start_render(callback, item, clips, quality=quality, cost_whisper=analysis_cost_whisper, cost_gemini=analysis_cost_gemini)
 
         elif mode == "custom":
             raw = item.get("analysis_result") or item.get("analysis_json")
@@ -1754,7 +1780,7 @@ async def on_render_callback(callback: types.CallbackQuery, state: FSMContext):
                 Clip(source=signed_url, trim_start=i * 3.0, trim_duration=3.0)
                 for i in range(4)
             ]
-            await _start_render(callback, item, clips, quality=quality)
+            await _start_render(callback, item, clips, quality=quality, cost_whisper=analysis_cost_whisper, cost_gemini=analysis_cost_gemini)
 
         await callback.answer()
 
@@ -1791,7 +1817,7 @@ async def on_custom_clip_numbers(message: types.Message, state: FSMContext):
         pass
     ctx = _Ctx()
     ctx.message = message
-    await _start_render(ctx, item, clips, quality="prod")
+    await _start_render(ctx, item, clips, quality="prod", cost_whisper=item.get("cost_whisper") or 0.0, cost_gemini=item.get("cost_gemini") or 0.0)
 
 
 # ---------------------------------------------------------------------------

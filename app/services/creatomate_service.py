@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 API_URL = "https://api.creatomate.com/v1/renders"
 
 # Creatomate pricing: fixed cost per render based on plan
-CREATOMATE_COST_PER_RENDER = 1.00  # USD estimate per render — adjust based on actual plan
+CREATOMATE_COST_PER_RENDER = 0.00  # TODO: set actual cost when plan is known
 
 
 @dataclass
