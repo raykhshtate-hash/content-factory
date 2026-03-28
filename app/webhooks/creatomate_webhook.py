@@ -96,8 +96,8 @@ async def process_creatomate_render(item_id: str, payload: dict):
         bot = Bot(token=settings.BOT_TOKEN)
         try:
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Одобрить и опубликовать", callback_data=f"approve:{item_id}")],
-                [InlineKeyboardButton(text="❌ Отклонить / Переделать", callback_data=f"reject:{item_id}")]
+                [InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve:{item_id}")],
+                [InlineKeyboardButton(text="✏️ Переделать", callback_data=f"redo:{item_id}")]
             ])
 
             caption = "🎬 Твое видео готово!\n"

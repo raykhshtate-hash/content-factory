@@ -1,7 +1,10 @@
 import json
+import logging
 import re
 from pathlib import Path
 from anthropic import AsyncAnthropic
+
+logger = logging.getLogger(__name__)
 
 # Load system prompt once at module level
 _SYSTEM_PROMPT_PATH = Path(__file__).parent.parent / "prompts" / "claude_system.txt"
@@ -300,3 +303,48 @@ class ClaudeService:
         except (json.JSONDecodeError, KeyError):
             # Graceful fallback to all formats
             return list(FORMAT_DESCRIPTIONS.keys())[:3]
+
+
+# ── Standalone feedback classifier (Haiku — cheapest model) ──────────────
+
+
+async def classify_feedback(feedback_text: str, api_key: str) -> dict:
+    """
+    Classify user feedback using Claude Haiku into pipeline routing categories.
+    Returns: {"gemini_instruction": str|None, "director_instruction": str|None}
+    Per D-21: ~$0.001/call using Haiku.
+    """
+    client = AsyncAnthropic(api_key=api_key)
+
+    system_prompt = (
+        "Ты — классификатор обратной связи для видео-продакшн пайплайна.\n"
+        "Пользователь оставляет замечание на готовое видео. "
+        "Определи, к чему относится замечание:\n\n"
+        "1. gemini_instruction — выбор кадров, длительность клипов, порядок сцен, "
+        "какие моменты показать, слишком много/мало крупных планов, "
+        "скучный выбор, однообразные кадры.\n"
+        "2. director_instruction — переходы, эффекты, стикеры, стиль монтажа, "
+        "цвета субтитров, скорость переходов, визуальный стиль.\n\n"
+        "Замечание может относиться к ОБЕИМ категориям одновременно.\n"
+        "Для каждой категории верни краткую инструкцию на русском "
+        "(что именно изменить) или null если не относится.\n\n"
+        "Отвечай СТРОГО в JSON формате:\n"
+        '{"gemini_instruction": "строка или null", "director_instruction": "строка или null"}'
+    )
+
+    response = await client.messages.create(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=256,
+        system=system_prompt,
+        messages=[{"role": "user", "content": feedback_text}],
+    )
+
+    try:
+        result = json.loads(response.content[0].text)
+        return {
+            "gemini_instruction": result.get("gemini_instruction"),
+            "director_instruction": result.get("director_instruction"),
+        }
+    except (json.JSONDecodeError, IndexError, KeyError):
+        logger.warning("Failed to parse Haiku classification, using fallback")
+        return {"gemini_instruction": feedback_text, "director_instruction": None}
