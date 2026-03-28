@@ -39,6 +39,13 @@ Format: `YYYY-MM-DD | Что случилось | Почему | Правило 
 - 2026-03-23 | Gemini excels at semantic matching (broll → voiceover segment) but fails at cumulative math | Separate responsibilities: Gemini = semantics, Python = math.
 - 2026-03-23 | Voiceover segments are independent phrases, not continuous narrative | This insight unlocked per-clip architecture — clip order on timeline doesn't affect voiceover correctness.
 
+## Parsing / Data
+
+- 2026-03-28 | `_parse_mmss` failed on Gemini timestamps >120s | Gemini returns seconds.fractional (e.g. `245.7`), not `MM:SS` | Values >120 = seconds, not minutes
+- 2026-03-28 | Speech trim cut off last words or left silence | Need Whisper `speech_start - 0.3s` AND `speech_end + 1.0s` padding | Both start and end trimming required
+- 2026-03-28 | Too many render buttons confused users | Simplified to test (720p) / prod (1080p) quality only, no intermediate mode selection
+- 2026-03-28 | Subtitle color not validated, bad hex crashed render | Validate hex format, fallback `#FFFFFF` | Always validate user-facing color inputs
+
 ## Ops
 
 - 2026-03-23 | OpenAI billing limits silently break Creatomate renders | AI sticker generation via gpt-image-1.5 fails. Error only visible via Creatomate render status API, not in our logs.

@@ -8,7 +8,7 @@ Russian-language Instagram Reels for Romina (doctor-cosmetologist, Germany/Israe
 **Branch:** `dev` (active) | `v0.1.5` on `main` (stable)
 
 ## Architecture
-Python 3.12, FastAPI, aiogram 3.x | Claude Sonnet 4.6 (Visual Director) | Gemini 2.5 Flash via Vertex AI | Creatomate (dynamic JSON, no templates) | GCS + Cloud Run (europe-west1) | Supabase (PostgreSQL)
+Python 3.12, FastAPI, aiogram 3.x | Claude Opus 4.6 (prod/1080p) / Sonnet 4.6 (dev/720p) — Visual Director | Gemini 2.5 Flash via Vertex AI | Creatomate (dynamic JSON, no templates) | GCS + Cloud Run (europe-west1) | Supabase (PostgreSQL)
 
 **GCP:** `romina-content-factory-489121` | Cloud Run: `content-factory` | URL: `https://content-factory-7ufgsc2feq-ew.a.run.app`
 **SA:** `content-factory-sa@romina-content-factory-489121.iam.gserviceaccount.com`
@@ -20,13 +20,16 @@ Python 3.12, FastAPI, aiogram 3.x | Claude Sonnet 4.6 (Visual Director) | Gemini
 - `audio_processing.py` — voiceover silence removal + speedup (storyboard only)
 - `drive_service.py` → `gcs_service.py` → presigned URLs | `creatomate_webhook.py` — delivery
 
-## Two Modes
+## Content Modes
 
 ### talking_head (INBOX/talking_head/)
 Video has audio (speaker on camera). Gemini selects best clips with timestamps. Karaoke `transcript_source` = video element name (per-clip). Stickers always needed — same face gets boring. No audio processing.
 
-### storyboard (INBOX/storyboard/)
-Numbered clips (01.mp4, 02.mp4...) + `voiceover.mp3`. Video `volume: "0%"`. Single karaoke on track 3 with `transcript_source: "voiceover"`. Audio element `id="voiceover"` on track 2. Voiceover processed: silence removal → dynamic speedup (capped 1.5x) → re-speed for transition overlap. Stickers almost never (max 1).
+### storyboard ordered (INBOX/storyboard/, numbered files)
+Numbered clips (01.mp4, 02.mp4...) + `voiceover.mp3`. Video `volume: "0%"`. Single karaoke on track 3 with `transcript_source: "voiceover"`. Audio element `id="voiceover"` on track 2. Voiceover processed: silence removal → dynamic speedup (capped 1.5x) → re-speed for transition overlap. Whisper candidate spans for sticker placement. Stickers almost never (max 1).
+
+### storyboard smart (INBOX/storyboard/, unnumbered files)
+Unnumbered clips + `voiceover.mp3`. Routes through Gemini pipeline (like talking_head). All clips = broll. Per-clip voiceover on track 5.
 
 ### Hybrid Mode (talking_head + voiceover)
 Per-clip voiceover architecture. Each matched broll gets its own audio element.
@@ -37,7 +40,7 @@ Supabase: `voiceover_segments` + `voiceover_words` + `voiceover_duration` in `an
 Clip dataclass: `matched_voiceover_segment` field added.
 
 ### Clip Pre-buffer
-**0.5s buffer before `trim_start`**: `adjusted_trim_start = max(0, trim_start - 0.5)`. Prevents cutting off phrase beginnings.
+**Gap-aware pre-buffer**: 0.5s capped to actual inter-clip gap for same-source clips. Prevents audio replay during transitions.
 
 ### B-roll Timeline Mapping
 `render_time = render_start + (source_time - trim_start)` — Gemini timecodes are in source timeline, not rendered output.
@@ -90,6 +93,8 @@ When the user pastes implementation or architecture instructions (from Antigravi
 - Same source URL can't have multiple `transcript_source` — use `transcribed_sources` set.
 - Storyboard: omit explicit `duration` when voiceover present.
 - AI providers: only `openai`, `elevenlabs`, `stabilityai`.
+- `background_color: "transparent"` required for AI sticker image elements.
+- Decoupled audio: talking_head + transitions → video muted track 1, audio track 2 clean cuts.
 
 ### Gemini
 - `temperature=0` for deterministic results. Prompt is sensitive — test changes separately.
@@ -98,10 +103,10 @@ When the user pastes implementation or architecture instructions (from Antigravi
 ---
 
 ## Visual Director (compact)
-Claude Sonnet 4.6, temperature=0, JSON-only API. Fallback on error: clean mode.
+Quality-based: Opus 4.6 (prod) / Sonnet 4.6 (dev), temperature=0, JSON-only API. Fallback on error: clean mode.
 Modes: clean (hard cuts) | soft (fade/wipe) | dynamic (varied) | mixed (per-section).
 Transitions: `animations[]` with `"transition": true`, 0.5s. Forbidden: scale, spin, flip.
-Stickers: timeline-based, provider `openai model=gpt-image-1.5`, `dynamic: true`, `reversed: true` on exit.
+Stickers: timeline-based, provider `openai model=gpt-image-1.5 background=transparent`, `dynamic: true`, `reversed: true` on exit.
 
 ---
 
