@@ -118,6 +118,7 @@ class WhisperService:
     def __init__(self, api_key: str):
         self.client = openai.AsyncOpenAI(api_key=api_key)
         self.model = "whisper-1"
+        self._last_cost_usd: float = 0.0
 
     async def transcribe(self, audio_bytes: bytes, filename: str = "voice.ogg") -> str:
         """
@@ -204,6 +205,13 @@ class WhisperService:
 
             transcription = await self._do_transcribe(tmp_out_path)
 
+            # ── Cost extraction: $0.006/min of audio ──
+            duration_sec = getattr(transcription, "duration", None)
+            if duration_sec:
+                cost_usd = (float(duration_sec) / 60.0) * 0.006
+                self._last_cost_usd = cost_usd
+                logger.info("Whisper cost: $%.4f (%.1fs audio)", cost_usd, float(duration_sec))
+
             if not hasattr(transcription, "words") or not transcription.words:
                 return []
 
@@ -242,6 +250,13 @@ class WhisperService:
             transcription = await self._do_transcribe(
                 tmp_out_path, granularities=["word", "segment"], language="ru"
             )
+
+            # ── Cost extraction: $0.006/min of audio ──
+            duration_sec = getattr(transcription, "duration", None)
+            if duration_sec:
+                cost_usd = (float(duration_sec) / 60.0) * 0.006
+                self._last_cost_usd = cost_usd
+                logger.info("Whisper cost: $%.4f (%.1fs audio)", cost_usd, float(duration_sec))
 
             segments_raw = getattr(transcription, "segments", None)
             if not segments_raw:

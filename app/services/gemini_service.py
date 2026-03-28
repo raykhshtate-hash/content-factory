@@ -107,6 +107,7 @@ class GeminiService:
         project_id: str = "romina-content-factory-489121",
         location: str = "europe-west1",
     ):
+        self._last_cost_usd: float = 0.0
         try:
             self.client = genai.Client(
                 vertexai=True,
@@ -116,6 +117,23 @@ class GeminiService:
         except Exception as e:
             logger.error("Vertex AI init failed: %s", e)
             self.client = None
+
+    def _extract_cost(self, response) -> None:
+        """Extract cost from Gemini response usage_metadata.
+        Gemini 2.5 Flash pricing: ~$0.15/1M input, ~$0.60/1M output tokens.
+        """
+        try:
+            meta = getattr(response, "usage_metadata", None)
+            if meta:
+                prompt_tokens = getattr(meta, "prompt_token_count", 0) or 0
+                output_tokens = getattr(meta, "candidates_token_count", 0) or 0
+                cost_usd = (prompt_tokens * 0.15 + output_tokens * 0.60) / 1_000_000
+                self._last_cost_usd = cost_usd
+                logger.info("Gemini cost: $%.4f (in=%d, out=%d tokens)", cost_usd, prompt_tokens, output_tokens)
+            else:
+                self._last_cost_usd = 0.0
+        except Exception:
+            self._last_cost_usd = 0.0
 
     @retry(
         retry=retry_if_exception(
@@ -222,6 +240,9 @@ class GeminiService:
                     and hasattr(response.candidates[0], "finish_reason")
                     and str(response.candidates[0].finish_reason).upper() == "SAFETY"):
                 raise GeminiSafetyError("Gemini response blocked by safety filter")
+
+            # ── Cost extraction ──
+            self._extract_cost(response)
 
             if response.parsed:
                 logger.info("[Gemini] Analysis parsed successfully")
@@ -363,6 +384,9 @@ class GeminiService:
                     and hasattr(response.candidates[0], "finish_reason")
                     and str(response.candidates[0].finish_reason).upper() == "SAFETY"):
                 raise GeminiSafetyError("Gemini storyboard response blocked by safety filter")
+
+            # ── Cost extraction ──
+            self._extract_cost(response)
 
             if response.parsed:
                 logger.info("[Gemini] Storyboard analysis parsed successfully")

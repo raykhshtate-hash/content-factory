@@ -22,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 API_URL = "https://api.creatomate.com/v1/renders"
 
+# Creatomate pricing: fixed cost per render based on plan
+CREATOMATE_COST_PER_RENDER = 1.00  # USD estimate per render — adjust based on actual plan
+
 
 @dataclass
 class Clip:
@@ -394,6 +397,7 @@ def apply_visual_blueprint(
 class CreatomateService:
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key or settings.CREATOMATE_API_KEY
+        self._last_cost_usd: float = 0.0
         if not self.api_key:
             raise ValueError("CREATOMATE_API_KEY is not set")
 
@@ -976,7 +980,9 @@ class CreatomateService:
         render = data[0] if isinstance(data, list) else data
         render_id = render["id"]
 
+        self._last_cost_usd = CREATOMATE_COST_PER_RENDER
         logger.info("Creatomate render created: %s", render_id)
+        logger.info("Creatomate cost: $%.2f (render_id=%s)", CREATOMATE_COST_PER_RENDER, render_id)
         return render_id
 
     async def create_render(

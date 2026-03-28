@@ -652,11 +652,11 @@ async def get_visual_blueprint(
                     When provided, Claude receives anchors instead of choosing timing.
     :param candidate_spans: Optional candidate spans for semantic sticker selection.
                            When provided, Claude selects best spans from candidates.
-    :return: Blueprint dict with overall_style, font_family, reasoning, clips[].transition, overlays[]
+    :return: Tuple of (blueprint dict, cost_usd). Blueprint has overall_style, font_family, reasoning, clips[].transition, overlays[]
     """
     num_clips = len(clips)
     if num_clips == 0:
-        return _make_fallback(0)
+        return _make_fallback(0), 0.0
 
     clip_durations = [c["duration"] for c in clips]
 
@@ -829,6 +829,22 @@ async def get_visual_blueprint(
         response_text = message.content[0].text
         logger.debug(f"Visual director raw: {response_text[:500]}")
 
+        # ── Cost extraction ──
+        cost_usd = 0.0
+        try:
+            usage = message.usage
+            input_tokens = usage.input_tokens
+            output_tokens = usage.output_tokens
+            # Pricing: Opus 4.6 ~$15/$75, Sonnet 4.6 ~$3/$15 per 1M tokens
+            if "opus" in model_name:
+                in_rate, out_rate = 15, 75
+            else:
+                in_rate, out_rate = 3, 15
+            cost_usd = (input_tokens * in_rate + output_tokens * out_rate) / 1_000_000
+            logger.info("Visual Director cost: $%.4f (in=%d, out=%d, model=%s)", cost_usd, input_tokens, output_tokens, model_name)
+        except Exception:
+            pass
+
         text = response_text.strip()
         if text.startswith("```"):
             text = text.split("\n", 1)[1]
@@ -849,10 +865,10 @@ async def get_visual_blueprint(
         )
         if validated is None:
             logger.warning("Visual blueprint validation failed, using fallback")
-            return _make_fallback(num_clips)
+            return _make_fallback(num_clips), cost_usd
 
-        return validated
+        return validated, cost_usd
 
     except Exception as e:
         logger.warning("Visual director failed (%s), using fallback", e)
-        return _make_fallback(num_clips)
+        return _make_fallback(num_clips), 0.0
