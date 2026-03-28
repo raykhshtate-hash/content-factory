@@ -6,6 +6,18 @@ from supabase import create_client, Client
 
 from app.config import settings
 
+# Cost columns on content_items (added for billing tracking):
+#   cost_whisper    NUMERIC  — Whisper transcription cost in USD
+#   cost_gemini     NUMERIC  — Gemini analysis cost in USD
+#   cost_claude     NUMERIC  — Claude Visual Director cost in USD
+#   cost_creatomate NUMERIC  — Creatomate render cost in USD
+#   cost_total_usd  NUMERIC  — Sum of all costs in USD
+#   gemini_prompt_version   TEXT — Version of Gemini prompt used
+#   director_prompt_version TEXT — Version of Visual Director prompt used
+#
+# These columns must be added to Supabase content_items table.
+# Migration: scripts/add_cost_columns.sql
+
 TABLE = "content_items"
 
 _client: Optional[Client] = None

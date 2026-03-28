@@ -1288,7 +1288,7 @@ async def _candidates_to_clips(candidates, gcs_uris: list[str], gcs_service: GCS
     return clips
 
 
-async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[Clip], quality: str = "prod"):
+async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[Clip], quality: str = "prod", cost_whisper: float = 0.0, cost_gemini: float = 0.0):
     """Common render logic for all modes. Karaoke subtitles are handled
     natively by Creatomate's transcript_effect — no Whisper needed."""
     item_id = item["id"]
@@ -1457,7 +1457,7 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
     if candidate_spans:
         # New path: Director selects from candidates by semantics
         anchors = None
-        blueprint = await get_visual_blueprint(
+        blueprint, director_cost = await get_visual_blueprint(
             scenario_text=script_text,
             clips=clips_info,
             render_mode=vd_render_mode,
@@ -1507,7 +1507,7 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
             sticker_count=sticker_count,
             total_duration=total_dur,
         )
-        blueprint = await get_visual_blueprint(
+        blueprint, director_cost = await get_visual_blueprint(
             scenario_text=script_text,
             clips=clips_info,
             render_mode=vd_render_mode,
@@ -1566,6 +1566,28 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
             creatomate_render_id=render_id,
             selected_clips=[c.__dict__ for c in clips],
         )
+
+        # ── Cost aggregation + prompt versioning ──
+        from app.config import GEMINI_PROMPT_V, DIRECTOR_PROMPT_V
+        cost_claude = director_cost
+        cost_creatomate = creatomate._last_cost_usd
+        cost_total = cost_whisper + cost_gemini + cost_claude + cost_creatomate
+        logger.info(
+            "Render cost: total=$%.4f (whisper=$%.4f gemini=$%.4f claude=$%.4f creatomate=$%.4f) | versions: gemini=%s director=%s",
+            cost_total, cost_whisper, cost_gemini, cost_claude, cost_creatomate,
+            GEMINI_PROMPT_V, DIRECTOR_PROMPT_V,
+        )
+        await supabase_service.update_item(
+            item_id,
+            cost_whisper=round(cost_whisper, 4),
+            cost_gemini=round(cost_gemini, 4),
+            cost_claude=round(cost_claude, 4),
+            cost_creatomate=round(cost_creatomate, 4),
+            cost_total_usd=round(cost_total, 4),
+            gemini_prompt_version=GEMINI_PROMPT_V,
+            director_prompt_version=DIRECTOR_PROMPT_V,
+        )
+
         await callback.message.edit_text(f"🎬 Монтирую ({quality_label})... Пришлю результат когда будет готово.")
 
     except RuntimeError as e:
