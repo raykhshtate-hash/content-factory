@@ -765,6 +765,7 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
         await callback.message.edit_text(f"🎬 Монтирую ({quality_label})... Пришлю результат когда будет готово.")
 
     except RuntimeError as e:
+        # STAB-04: analysis_result preserved — only status changes on render failure
         logger.error(f"Render initialization completely failed: {e}")
         await supabase_service.update_item(item_id, status="awaiting_footage")
         try:

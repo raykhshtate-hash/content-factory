@@ -441,7 +441,12 @@ class CreatomateService:
                     res.raise_for_status()
                 return res
 
-        resp = await _trigger_creatomate_api()
+        try:
+            resp = await _trigger_creatomate_api()
+        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            logger.error("Creatomate render failed after 3 retries: %s", e)
+            logger.warning("ADMIN_ALERT: Creatomate render exhausted retries — manual intervention may be needed")
+            raise
 
         if resp.status_code not in (200, 202):
             logger.error("Creatomate API error %d: %s", resp.status_code, resp.text)
