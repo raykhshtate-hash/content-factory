@@ -14,6 +14,15 @@ from google.genai import types
 from google.genai.errors import ClientError, ServerError
 from tenacity import retry, retry_if_exception, wait_exponential, stop_after_attempt
 
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+class GeminiSafetyError(Exception):
+    """Raised when Gemini response is blocked by safety filters."""
+    pass
+
 
 # ── Structured Output Schema ────────────────────────────────────
 
@@ -105,13 +114,14 @@ class GeminiService:
                 location=location,
             )
         except Exception as e:
-            print(f"⚠️ Vertex AI init failed: {e}")
+            logger.error("Vertex AI init failed: %s", e)
             self.client = None
 
     @retry(
         retry=retry_if_exception(
-            lambda e: isinstance(e, (ServerError,))
+            lambda e: isinstance(e, (ServerError, GeminiSafetyError))
             or (isinstance(e, ClientError) and getattr(e, "code", 0) == 429)
+            or (isinstance(e, ClientError) and "SAFETY" in str(e).upper())
         ),
         wait=wait_exponential(multiplier=3, min=10, max=60),
         stop=stop_after_attempt(3),
@@ -133,7 +143,7 @@ class GeminiService:
         speech/silence segment data and assigns clip_type per clip.
         """
         if not self.client:
-            print("❌ Gemini client not configured.")
+            logger.error("Gemini client not configured")
             return None
 
         if isinstance(gcs_uris, str):
@@ -182,7 +192,7 @@ class GeminiService:
             )
 
         try:
-            print(f"🧠 [Gemini] Analyzing {len(gcs_uris)} videos...")
+            logger.info("[Gemini] Analyzing %d videos...", len(gcs_uris))
 
             contents = []
             for uri in gcs_uris:
@@ -207,24 +217,31 @@ class GeminiService:
                 ),
             )
 
+            # Check for safety filter rejection
+            if (hasattr(response, "candidates") and response.candidates
+                    and hasattr(response.candidates[0], "finish_reason")
+                    and str(response.candidates[0].finish_reason).upper() == "SAFETY"):
+                raise GeminiSafetyError("Gemini response blocked by safety filter")
+
             if response.parsed:
-                print("✅ [Gemini] Analysis parsed successfully.")
+                logger.info("[Gemini] Analysis parsed successfully")
                 return response.parsed
 
             # Fallback: manual JSON parse
-            print("⚠️ [Gemini] Fallback to manual JSON parsing.")
+            logger.warning("[Gemini] Fallback to manual JSON parsing")
             return VideoAnalysis.model_validate_json(response.text)
 
-        except (ClientError, ServerError):
-            raise  # let @retry handle 429 / 5xx
+        except (ClientError, ServerError, GeminiSafetyError):
+            raise  # let @retry handle 429 / 5xx / safety
         except Exception as e:
-            print(f"❌ [Gemini] Error: {e}")
+            logger.error("[Gemini] Error: %s", e)
             return None
 
     @retry(
         retry=retry_if_exception(
-            lambda e: isinstance(e, (ServerError,))
+            lambda e: isinstance(e, (ServerError, GeminiSafetyError))
             or (isinstance(e, ClientError) and getattr(e, "code", 0) == 429)
+            or (isinstance(e, ClientError) and "SAFETY" in str(e).upper())
         ),
         wait=wait_exponential(multiplier=3, min=10, max=60),
         stop=stop_after_attempt(3),
@@ -250,7 +267,7 @@ class GeminiService:
         Returns: StoryboardAnalysis with per-scene audio↔video mapping.
         """
         if not self.client:
-            print("❌ Gemini client not configured.")
+            logger.error("Gemini client not configured")
             return None
 
         num_videos = len(video_gcs_uris)
@@ -309,7 +326,7 @@ class GeminiService:
         )
 
         try:
-            print(f"🧠 [Gemini] Analyzing storyboard: {num_videos} videos + audio...")
+            logger.info("[Gemini] Analyzing storyboard: %d videos + audio...", num_videos)
 
             contents = []
             for uri in video_gcs_uris:
@@ -341,15 +358,21 @@ class GeminiService:
                 ),
             )
 
+            # Check for safety filter rejection
+            if (hasattr(response, "candidates") and response.candidates
+                    and hasattr(response.candidates[0], "finish_reason")
+                    and str(response.candidates[0].finish_reason).upper() == "SAFETY"):
+                raise GeminiSafetyError("Gemini storyboard response blocked by safety filter")
+
             if response.parsed:
-                print("✅ [Gemini] Storyboard analysis parsed successfully.")
+                logger.info("[Gemini] Storyboard analysis parsed successfully")
                 return response.parsed
 
-            print("⚠️ [Gemini] Fallback to manual JSON parsing.")
+            logger.warning("[Gemini] Fallback to manual JSON parsing")
             return StoryboardAnalysis.model_validate_json(response.text)
 
-        except (ClientError, ServerError):
+        except (ClientError, ServerError, GeminiSafetyError):
             raise
         except Exception as e:
-            print(f"❌ [Gemini] Storyboard error: {e}")
+            logger.error("[Gemini] Storyboard error: %s", e)
             return None
