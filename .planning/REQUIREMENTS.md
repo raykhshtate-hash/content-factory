@@ -37,8 +37,8 @@ Requirements for Sprint 1+1.5 milestone. Each maps to roadmap phases.
 
 ### Feedback
 
-- [ ] **FEED-01**: Telegram UI shows "Approve" / "Redo" buttons after render delivery
-- [ ] **FEED-02**: Claude Haiku classifies feedback into gemini_instruction and/or director_instruction
+- [x] **FEED-01**: Telegram UI shows "Approve" / "Redo" buttons after render delivery
+- [x] **FEED-02**: Claude Haiku classifies feedback into gemini_instruction and/or director_instruction
 - [ ] **FEED-03**: B-lite instruction filtering — each pipeline step reruns only with its relevant instruction
 - [ ] **FEED-04**: Classification trace logged to Supabase (feedback_text, classified_type, affected_dimensions, acceptance)
 
@@ -121,8 +121,8 @@ Which phases cover which requirements. Updated during roadmap creation.
 | PIPE-05 | Phase 4 | Pending |
 | PIPE-06 | Phase 4 | Pending |
 | PIPE-07 | Phase 4 | Pending |
-| FEED-01 | Phase 2 | Pending |
-| FEED-02 | Phase 2 | Pending |
+| FEED-01 | Phase 2 | Complete |
+| FEED-02 | Phase 2 | Complete |
 | FEED-03 | Phase 5 | Pending |
 | FEED-04 | Phase 5 | Pending |
 | BILL-01 | Phase 1 | Complete |
