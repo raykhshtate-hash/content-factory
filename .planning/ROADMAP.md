@@ -52,7 +52,7 @@ Plans:
 
 Plans:
 - [x] 02-01: TBD
-- [ ] 02-02: TBD
+- [x] 02-02: TBD
 - [x] 02-03: TBD
 
 ### Phase 3: Animated Text & SFX

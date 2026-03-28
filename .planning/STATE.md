@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-03-28T22:40:41.439Z"
+status: verifying
+stopped_at: Completed 02-02-PLAN.md
+last_updated: "2026-03-28T22:45:30.689Z"
 last_activity: 2026-03-28
 progress:
   total_phases: 6
-  completed_phases: 1
+  completed_phases: 2
   total_plans: 6
-  completed_plans: 5
+  completed_plans: 6
   percent: 0
 ---
 
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-03-28)
 
 Phase: 02 (quality-harness-gemini-polish-basic-feedback) — EXECUTING
 Plan: 3 of 3
-Status: Ready to execute
+Status: Phase complete — ready for verification
 Last activity: 2026-03-28
 
 Progress: [░░░░░░░░░░] 0%
@@ -57,6 +57,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P03 | 3min | 2 tasks | 3 files |
 | Phase 02 P03 | 3min | 2 tasks | 4 files |
 | Phase 02 P01 | 6min | 2 tasks | 11 files |
+| Phase 02 P02 | 1min | 1 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -77,6 +78,8 @@ Recent decisions affecting current work:
 - [Phase 02]: classify_feedback as standalone function using Haiku (cheapest model) for feedback routing
 - [Phase 02]: GEMINI_PROMPT_V added to config.py for prompt versioning
 - [Phase 02]: Storyboard smart uses analyze_video path matching production
+- [Phase 02]: Diversity instructions only in analyze_and_propose (talking_head), not storyboard
+- [Phase 02]: GEMINI_PROMPT_V bumped to 1.1 for dedup/diversity/anti-linear prompt changes
 
 ### Pending Todos
 
@@ -88,6 +91,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-28T22:40:41.435Z
-Stopped at: Completed 02-01-PLAN.md
+Last session: 2026-03-28T22:45:30.684Z
+Stopped at: Completed 02-02-PLAN.md
 Resume file: None

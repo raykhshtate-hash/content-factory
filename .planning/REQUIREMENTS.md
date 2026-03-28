@@ -53,7 +53,7 @@ Requirements for Sprint 1+1.5 milestone. Each maps to roadmap phases.
 - [x] **QUAL-01**: Regression harness script (scripts/gemini_regression.py) with 8-12 fixture cases
 - [x] **QUAL-02**: Automated assertions: clip count, total duration, dedup score, unique sources, speech/broll ratio
 - [x] **QUAL-03**: gemini_prompt_version and director_prompt_version logged with each render
-- [ ] **QUAL-04**: Gemini prompt improvements: dedup penalty, diversity heuristic, anti-linear selection (time-boxed)
+- [x] **QUAL-04**: Gemini prompt improvements: dedup penalty, diversity heuristic, anti-linear selection (time-boxed)
 
 ### Stability
 
@@ -131,7 +131,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | QUAL-01 | Phase 2 | Complete |
 | QUAL-02 | Phase 2 | Complete |
 | QUAL-03 | Phase 1 | Complete |
-| QUAL-04 | Phase 2 | Pending |
+| QUAL-04 | Phase 2 | Complete |
 | STAB-01 | Phase 1 | Complete |
 | STAB-02 | Phase 1 | Complete |
 | STAB-03 | Phase 1 | Complete |

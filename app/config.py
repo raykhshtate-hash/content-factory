@@ -24,5 +24,5 @@ class Settings:
 settings = Settings()
 
 # Prompt versions — bump manually when prompts change
-GEMINI_PROMPT_V = "1.0"
+GEMINI_PROMPT_V = "1.1"
 DIRECTOR_PROMPT_V = "1.0"
