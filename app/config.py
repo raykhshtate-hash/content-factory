@@ -3,9 +3,6 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-# ── Prompt Versioning ──────────────────────────────────────────
-GEMINI_PROMPT_V = "1.0"
-
 class Settings:
     BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", os.getenv("BOT_TOKEN", ""))
     SUPABASE_URL: str = os.getenv("SUPABASE_URL", "")
