@@ -654,6 +654,9 @@ class ScriptEdit(StatesGroup):
     chatting = State()
     pasting_ready = State()
 
+class RedoFeedback(StatesGroup):
+    waiting_for_text = State()
+
 
 def _parse_mmss(mmss: str) -> float:
     """Convert 'MM:SS' or 'MM:SS.s' to seconds."""
@@ -1142,23 +1145,121 @@ async def process_ready_script(message: types.Message, state: FSMContext):
     await message.answer(messages.AWAITING_FOOTAGE_MESSAGE)
 
 
+# ── Redo feedback FSM handler (MUST be before fallback text handler) ──
+
+@router.message(RedoFeedback.waiting_for_text, F.text)
+async def process_redo_feedback(message: types.Message, state: FSMContext):
+    """Classify feedback via Haiku and store (per D-21, D-22, D-24, D-25)."""
+    data = await state.get_data()
+    item_id = data.get("item_id")
+
+    if not item_id:
+        await state.clear()
+        return
+
+    feedback_text = message.text
+    progress_msg = await message.answer("Анализирую замечание...")
+
+    try:
+        from app.services.claude_service import classify_feedback
+        from app.config import settings as _settings
+        from datetime import datetime, timezone
+
+        # Classify via Haiku (per D-21)
+        classification = await classify_feedback(feedback_text, _settings.ANTHROPIC_API_KEY)
+
+        # Build emoji response (per D-22, D-26)
+        labels = []
+        if classification.get("gemini_instruction"):
+            labels.append("🎬 выбор кадров")
+        if classification.get("director_instruction"):
+            labels.append("🎨 визуальный стиль")
+
+        if labels:
+            label_str = " + ".join(labels)
+            response_text = f"Поняла! Замечание касается: {label_str}. Учту при следующем рендере."
+        else:
+            response_text = "Поняла! Учту при следующем рендере."
+
+        # Store feedback (per D-24)
+        feedback_entry = {
+            "text": feedback_text,
+            "classification": classification,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+        # Append to feedback_history array
+        item = await supabase_service.get_item(item_id)
+        existing_history = item.get("feedback_history", []) if item else []
+        if not isinstance(existing_history, list):
+            existing_history = []
+        existing_history.append(feedback_entry)
+
+        # Update item: feedback + status (per D-25)
+        await supabase_service.update_item(
+            item_id,
+            feedback_history=existing_history,
+            status="redo_requested",
+        )
+
+        try:
+            await progress_msg.delete()
+        except Exception:
+            pass
+        await message.answer(response_text)
+
+    except Exception as e:
+        logger.error("[Redo Feedback Error] %s", e)
+        try:
+            await progress_msg.delete()
+        except Exception:
+            pass
+        await message.answer("Замечание сохранено. Учту при следующем рендере.")
+        # Still save feedback even on classification failure
+        try:
+            from datetime import datetime, timezone
+            feedback_entry = {
+                "text": feedback_text,
+                "classification": {"gemini_instruction": feedback_text, "director_instruction": None},
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            item = await supabase_service.get_item(item_id)
+            existing_history = item.get("feedback_history", []) if item else []
+            if not isinstance(existing_history, list):
+                existing_history = []
+            existing_history.append(feedback_entry)
+            await supabase_service.update_item(
+                item_id,
+                feedback_history=existing_history,
+                status="redo_requested",
+            )
+        except Exception:
+            pass
+
+    await state.clear()
+
+
 # Fallback text handler MUST be registered LAST
 @router.message(F.text, ~Command("start", "help", "status", "reels", "post", "carousel", "stories", "ready"))
 async def handle_text(message: types.Message):
     await _process_idea(message, message.text)
+
+
+# ── Approve / Redo callback handlers ─────────────────────────────────────
+
 @router.callback_query(F.data.startswith("approve:"))
 async def on_approve_video(callback: types.CallbackQuery):
     try:
-        print(f"🎯 [Callback] Received approve action: {callback.data}")
+        logger.info("[Callback] Received approve action: %s", callback.data)
         _, item_id = callback.data.split(":", 1)
-        
+
         await supabase_service.update_item(item_id, status="approved")
-        
+
         # We edit the caption to remove the keyboard and show it's approved
         new_caption = callback.message.caption or "🎬 Видео одобрено"
-        if "✅ Одобрить и опубликовать" not in new_caption:
+        if "✅ Одобрить" not in new_caption:
             new_caption = f"✅ Видео одобрено и готово к публикации!\n\n---\n{new_caption}"
-            
+
         try:
             await callback.message.edit_caption(
                 caption=new_caption,
@@ -1166,32 +1267,28 @@ async def on_approve_video(callback: types.CallbackQuery):
             )
         except Exception:
             pass
-            
+
         await callback.answer("Видео одобрено!")
     except Exception as e:
-        print(f"❌ [Callback Error] {e}")
+        logger.error("[Callback Error] approve: %s", e)
 
 
-@router.callback_query(F.data.startswith("reject:"))
-async def on_reject_video(callback: types.CallbackQuery):
+@router.callback_query(F.data.startswith("redo:"))
+async def on_redo_video(callback: types.CallbackQuery, state: FSMContext):
+    """User wants to redo -- ask for feedback text (per D-20)."""
     try:
-        print(f"🎯 [Callback] Received reject action: {callback.data}")
         _, item_id = callback.data.split(":", 1)
-        
-        await supabase_service.update_item(item_id, status="rejected")
-        
-        new_caption = callback.message.caption or "❌ Видео отклонено"
-        if "❌ Видео отклонено" not in new_caption:
-            new_caption = f"❌ Видео отправлено на переделку.\n\n---\n{new_caption}"
-            
+        logger.info("[Callback] Received redo action: %s", callback.data)
+
+        # Remove keyboard to prevent double-tap
         try:
-            await callback.message.edit_caption(
-                caption=new_caption,
-                reply_markup=None
-            )
+            await callback.message.edit_reply_markup(reply_markup=None)
         except Exception:
             pass
-            
-        await callback.answer("Видео отклонено (статус: rejected)")
+
+        await state.set_state(RedoFeedback.waiting_for_text)
+        await state.update_data(item_id=item_id)
+        await callback.message.answer("Что изменить? Опиши замечание свободным текстом")
+        await callback.answer()
     except Exception as e:
-        print(f"❌ [Callback Error] {e}")
+        logger.error("[Callback Error] redo: %s", e)
