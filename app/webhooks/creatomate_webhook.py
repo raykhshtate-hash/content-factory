@@ -23,14 +23,21 @@ async def process_creatomate_render(item_id: str, payload: dict):
             logger.error(f"Creatomate render failed for item {item_id}: {payload}")
             await supabase_service.update_item(item_id, status="render_failed")
             
-            # Notify user
+            # Notify user with retry button (STAB-03)
             item = await supabase_service.get_item(item_id)
             if item and item.get("telegram_chat_id"):
                 bot = Bot(token=settings.BOT_TOKEN)
                 try:
+                    retry_keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                        [InlineKeyboardButton(
+                            text="🔄 Повторить рендер",
+                            callback_data=f"retry_render:{item_id}"
+                        )]
+                    ])
                     await bot.send_message(
                         chat_id=item["telegram_chat_id"],
-                        text=f"❌ Ошибка рендера видео.\nCreatomate вернул статус: {status}"
+                        text=f"❌ Ошибка рендера видео.\nCreatomate статус: {status}",
+                        reply_markup=retry_keyboard,
                     )
                 finally:
                     await bot.session.close()
@@ -117,7 +124,29 @@ async def process_creatomate_render(item_id: str, payload: dict):
                 height=1920,
                 supports_streaming=True,
             )
-            
+
+            # Cost breakdown (BILL-03)
+            item_with_costs = await supabase_service.get_item(item_id)
+            if item_with_costs:
+                cost_total = item_with_costs.get("cost_total_usd", 0) or 0
+                cost_w = item_with_costs.get("cost_whisper", 0) or 0
+                cost_g = item_with_costs.get("cost_gemini", 0) or 0
+                cost_c = item_with_costs.get("cost_claude", 0) or 0
+                cost_cr = item_with_costs.get("cost_creatomate", 0) or 0
+
+                if cost_total > 0:
+                    cost_text = (
+                        f"💰 Стоимость рендера: ${cost_total:.2f}\n"
+                        f"  Whisper: ${cost_w:.4f}\n"
+                        f"  Gemini: ${cost_g:.4f}\n"
+                        f"  Claude: ${cost_c:.4f}\n"
+                        f"  Creatomate: ${cost_cr:.2f}"
+                    )
+                    try:
+                        await bot.send_message(chat_id=chat_id, text=cost_text)
+                    except Exception:
+                        logger.warning("Failed to send cost breakdown for item %s", item_id)
+
         except Exception as e:
             logger.error(f"Failed to send video to Telegram for item {item_id}: {e}")
             await supabase_service.update_item(item_id, status="render_failed")

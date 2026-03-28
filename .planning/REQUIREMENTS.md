@@ -46,7 +46,7 @@ Requirements for Sprint 1+1.5 milestone. Each maps to roadmap phases.
 
 - [x] **BILL-01**: Cost columns added to Supabase content_items (cost_whisper, cost_gemini, cost_claude, cost_creatomate, cost_total_usd)
 - [x] **BILL-02**: Usage logged after each API call
-- [ ] **BILL-03**: Bot sends cost breakdown in Telegram after each render
+- [x] **BILL-03**: Bot sends cost breakdown in Telegram after each render
 
 ### Quality
 
@@ -59,7 +59,7 @@ Requirements for Sprint 1+1.5 milestone. Each maps to roadmap phases.
 
 - [x] **STAB-01**: Retry logic for Creatomate 500 errors with exponential backoff
 - [x] **STAB-02**: Retry logic for Gemini safety filter rejections
-- [ ] **STAB-03**: Render state saved to Supabase enabling "Retry render" button
+- [x] **STAB-03**: Render state saved to Supabase enabling "Retry render" button
 - [x] **STAB-04**: Error recovery preserves partial pipeline state (no full restart needed)
 
 ## v2 Requirements
@@ -127,14 +127,14 @@ Which phases cover which requirements. Updated during roadmap creation.
 | FEED-04 | Phase 5 | Pending |
 | BILL-01 | Phase 1 | Complete |
 | BILL-02 | Phase 1 | Complete |
-| BILL-03 | Phase 1 | Pending |
+| BILL-03 | Phase 1 | Complete |
 | QUAL-01 | Phase 2 | Pending |
 | QUAL-02 | Phase 2 | Pending |
 | QUAL-03 | Phase 1 | Complete |
 | QUAL-04 | Phase 2 | Pending |
 | STAB-01 | Phase 1 | Complete |
 | STAB-02 | Phase 1 | Complete |
-| STAB-03 | Phase 1 | Pending |
+| STAB-03 | Phase 1 | Complete |
 | STAB-04 | Phase 1 | Complete |
 
 **Coverage:**
