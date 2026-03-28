@@ -96,6 +96,7 @@ def run_assertions(
     clips: list[dict],
     expected: dict,
     thresholds: dict,
+    mode: str = "talking_head",
 ) -> list[AssertionResult]:
     """
     Run 5 quality assertions on Gemini clip output.
@@ -182,9 +183,9 @@ def run_assertions(
         note=f"{max_consec}" if consec_ok else f"Too many consecutive: {max_consec} > {consec_threshold}",
     ))
 
-    # ── 5. Anti-linearity — broll only (WARNING) ──
-    # Fail only if ALL broll clips are in strict ascending (video_index, start_time) order
-    if len(broll_clips) <= 1:
+    # ── 5. Anti-linearity — broll only, talking_head only (WARNING) ──
+    # Skip for storyboard: few source clips make linearity inevitable
+    if mode == "storyboard_smart" or len(broll_clips) <= 1:
         linear_ok = True
     else:
         is_strictly_linear = True
@@ -405,7 +406,7 @@ async def main():
                 continue
 
             clips_data = [c.model_dump() for c in analysis.clip_candidates]
-            results = run_assertions(clips_data, expected, merged_thresholds)
+            results = run_assertions(clips_data, expected, merged_thresholds, mode=mode)
 
             # Determine row status
             row_hard_fail = any(not r.passed and r.hard for r in results)

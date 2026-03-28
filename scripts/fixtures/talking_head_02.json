@@ -13,9 +13,130 @@
   "audio_map": null,
   "voiceover_data": null,
   "expected": {
-    "clip_count": [6, 14],
-    "total_duration": [25, 65]
+    "clip_count": [
+      6,
+      14
+    ],
+    "total_duration": [
+      25,
+      65
+    ]
   },
   "threshold_overrides": {},
-  "baseline": null
+  "baseline": {
+    "clip_candidates": [
+      {
+        "video_index": 1,
+        "start_time": "00:01.5",
+        "end_time": "00:07.5",
+        "reason": "Показывает палочки для еды, что является характерной деталью китайского ресторана и вызывает интерес.",
+        "scene_label": "STORY",
+        "clip_type": "speech",
+        "visual_description": "Девушка в очках достает палочки из упаковки, улыбается.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": null
+      },
+      {
+        "video_index": 1,
+        "start_time": "00:10.5",
+        "end_time": "00:14.5",
+        "reason": "Представляет блюдо (суп), что является ключевым элементом посещения ресторана.",
+        "scene_label": "STORY",
+        "clip_type": "speech",
+        "visual_description": "Девушка показывает миску с супом, готовясь есть.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": null
+      },
+      {
+        "video_index": 1,
+        "start_time": "00:14.5",
+        "end_time": "00:21.5",
+        "reason": "Юмористический момент с 'слюнявчиком' (нагрудником), который добавляет легкости и запоминаемости.",
+        "scene_label": "PIVOT",
+        "clip_type": "speech",
+        "visual_description": "Девушка надевает большой нагрудник с логотипом, улыбается.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": null
+      },
+      {
+        "video_index": 2,
+        "start_time": "00:00.5",
+        "end_time": "00:10.0",
+        "reason": "Интригующая история о странном человеке, снимающем себя на камеру, создает вовлечение.",
+        "scene_label": "HOOK",
+        "clip_type": "speech",
+        "visual_description": "Девушка и мужчина смотрят в камеру, девушка рассказывает историю.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": null
+      },
+      {
+        "video_index": 2,
+        "start_time": "00:17.5",
+        "end_time": "00:18.5",
+        "reason": "Положительная оценка еды, подтверждающая хороший опыт в ресторане.",
+        "scene_label": "CLOSING",
+        "clip_type": "speech",
+        "visual_description": "Девушка улыбается, говоря о еде.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": null
+      },
+      {
+        "video_index": 4,
+        "start_time": "00:00.0",
+        "end_time": "00:04.0",
+        "reason": "Визуально привлекательный процесс приготовления лапши, демонстрирующий аутентичность китайской кухни.",
+        "scene_label": "STORY",
+        "clip_type": "broll",
+        "visual_description": "Повар раскатывает тесто для лапши на кухне ресторана.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": "Секреты китайской кухни!"
+      },
+      {
+        "video_index": 4,
+        "start_time": "00:04.0",
+        "end_time": "00:09.0",
+        "reason": "Показывает разнообразие видов лапши, что может быть интересно для зрителей, любящих еду.",
+        "scene_label": "STORY",
+        "clip_type": "broll",
+        "visual_description": "Различные виды лапши на зеленом подносе с этикетками.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": "Выбери свою идеальную лапшу!"
+      },
+      {
+        "video_index": 5,
+        "start_time": "00:00.0",
+        "end_time": "00:07.0",
+        "reason": "Подача готовых блюд, демонстрирующая аппетитный результат посещения ресторана.",
+        "scene_label": "STORY",
+        "clip_type": "broll",
+        "visual_description": "Мужчина держит поднос с китайскими пельменями и огурцами.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": "Наши блюда уже готовы!"
+      },
+      {
+        "video_index": 6,
+        "start_time": "00:00.0",
+        "end_time": "00:04.0",
+        "reason": "Крупный план аппетитных китайских пельменей, вызывающий желание попробовать.",
+        "scene_label": "CLOSING",
+        "clip_type": "broll",
+        "visual_description": "Крупный план жареных китайских пельменей на тарелке.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": "Идеальные пельмешки!"
+      }
+    ],
+    "hook_score": 8,
+    "confidence": 0.9,
+    "visual_risk": "none",
+    "suggested_music_mood": "upbeat"
+  }
 }

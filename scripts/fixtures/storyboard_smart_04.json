@@ -2,21 +2,82 @@
   "name": "smart_dumplings_3clip_v4",
   "mode": "storyboard_smart",
   "gcs_uris": [
-    "gs://romina-content-factory-489121/footage/678e3c9a-3e39-4a39-8e0a-f40f329b255e/7c74d1c4_\u041a\u043e\u043f\u0438\u044f IMG_7793.MOV",
-    "gs://romina-content-factory-489121/footage/678e3c9a-3e39-4a39-8e0a-f40f329b255e/8c0dc179_\u041a\u043e\u043f\u0438\u044f IMG_7795.MOV",
-    "gs://romina-content-factory-489121/footage/678e3c9a-3e39-4a39-8e0a-f40f329b255e/60bbe7f5_\u041a\u043e\u043f\u0438\u044f IMG_7803.MOV"
+    "gs://romina-content-factory-489121/footage/678e3c9a-3e39-4a39-8e0a-f40f329b255e/7c74d1c4_Копия IMG_7793.MOV",
+    "gs://romina-content-factory-489121/footage/678e3c9a-3e39-4a39-8e0a-f40f329b255e/8c0dc179_Копия IMG_7795.MOV",
+    "gs://romina-content-factory-489121/footage/678e3c9a-3e39-4a39-8e0a-f40f329b255e/60bbe7f5_Копия IMG_7803.MOV"
   ],
-  "voiceover_gcs_uri": "gs://romina-content-factory-489121/footage/678e3c9a-3e39-4a39-8e0a-f40f329b255e/a0024134_\u041a\u043e\u043f\u0438\u044f voiceover.mp3",
-  "scenario_text": "\u041f\u0435\u043b\u044c\u043c\u0435\u0448\u043a\u0438 \u0432 \u043a\u0438\u0442\u0430\u0439\u0441\u043a\u043e\u043c \u0440\u0435\u0441\u0442\u043e\u0440\u0430\u043d\u0435",
+  "voiceover_gcs_uri": "gs://romina-content-factory-489121/footage/678e3c9a-3e39-4a39-8e0a-f40f329b255e/a0024134_Копия voiceover.mp3",
+  "scenario_text": "Пельмешки в китайском ресторане",
   "audio_map": null,
   "voiceover_data": null,
   "expected": {
-    "clip_count": [2, 8],
-    "total_duration": [8, 30]
+    "clip_count": [
+      2,
+      8
+    ],
+    "total_duration": [
+      8,
+      30
+    ]
   },
   "threshold_overrides": {
     "min_clip_count": 2,
     "min_duration_s": 8
   },
-  "baseline": null
+  "baseline": {
+    "clip_candidates": [
+      {
+        "video_index": 1,
+        "start_time": "00:05.0",
+        "end_time": "00:07.0",
+        "reason": "Неожиданный и юмористический комментарий, который может заинтриговать зрителя в начале видео.",
+        "scene_label": "HOOK",
+        "clip_type": "speech",
+        "visual_description": "Рука убирает чек с тарелки с жареными пельменями и огурцами.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": null
+      },
+      {
+        "video_index": 1,
+        "start_time": "00:02.0",
+        "end_time": "00:04.5",
+        "reason": "Показывает подачу основного блюда, создавая аппетитный визуальный ряд.",
+        "scene_label": "STORY",
+        "clip_type": "broll",
+        "visual_description": "Крупный план тарелки с пельменями и огурцами на зеленом подносе.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": "Наши пельмешки прибыли!"
+      },
+      {
+        "video_index": 2,
+        "start_time": "00:00.0",
+        "end_time": "00:02.5",
+        "reason": "Детальный и аппетитный кадр готовых пельменей, усиливающий желание попробовать.",
+        "scene_label": "STORY",
+        "clip_type": "broll",
+        "visual_description": "Очень крупный план аппетитных жареных пельменей на тарелке.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": "Идеальные пельмешки!"
+      },
+      {
+        "video_index": 3,
+        "start_time": "00:00.0",
+        "end_time": "00:05.0",
+        "reason": "Демонстрирует процесс приготовления лапши/теста, подчеркивая аутентичность и свежесть.",
+        "scene_label": "STORY",
+        "clip_type": "broll",
+        "visual_description": "Повар замешивает тесто, рядом образцы разных видов лапши.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": "Секреты китайской кухни!"
+      }
+    ],
+    "hook_score": 6,
+    "confidence": 0.9,
+    "visual_risk": "none",
+    "suggested_music_mood": "upbeat"
+  }
 }

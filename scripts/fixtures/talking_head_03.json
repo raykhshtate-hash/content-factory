@@ -9,9 +9,118 @@
   "audio_map": null,
   "voiceover_data": null,
   "expected": {
-    "clip_count": [4, 12],
-    "total_duration": [20, 60]
+    "clip_count": [
+      4,
+      12
+    ],
+    "total_duration": [
+      20,
+      60
+    ]
   },
   "threshold_overrides": {},
-  "baseline": null
+  "baseline": {
+    "clip_candidates": [
+      {
+        "video_index": 1,
+        "start_time": "00:00.5",
+        "end_time": "00:05.0",
+        "reason": "Engaging question setting up the topic of things liked about German education.",
+        "scene_label": "HOOK",
+        "clip_type": "speech",
+        "visual_description": "Young man with curly blonde hair sitting, looking at camera.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": null
+      },
+      {
+        "video_index": 1,
+        "start_time": "00:05.5",
+        "end_time": "00:15.0",
+        "reason": "Highlights a positive aspect of German education – good teaching and knowledge acquisition.",
+        "scene_label": "STORY",
+        "clip_type": "speech",
+        "visual_description": "Young man talking directly to the camera, gesturing slightly.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": null
+      },
+      {
+        "video_index": 1,
+        "start_time": "00:16.5",
+        "end_time": "00:22.0",
+        "reason": "Relatable and slightly unexpected positive point about school food.",
+        "scene_label": "STORY",
+        "clip_type": "speech",
+        "visual_description": "Young man talking, smiling slightly.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": null
+      },
+      {
+        "video_index": 1,
+        "start_time": "00:23.5",
+        "end_time": "00:32.5",
+        "reason": "Specific cultural appreciation, showing a personal connection to the German language.",
+        "scene_label": "STORY",
+        "clip_type": "speech",
+        "visual_description": "Young man talking, looking thoughtful.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": null
+      },
+      {
+        "video_index": 2,
+        "start_time": "00:00.5",
+        "end_time": "00:05.0",
+        "reason": "Engaging question setting up the topic of things disliked about German school.",
+        "scene_label": "PIVOT",
+        "clip_type": "speech",
+        "visual_description": "Young man with curly blonde hair sitting, looking at camera.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": null
+      },
+      {
+        "video_index": 2,
+        "start_time": "00:05.5",
+        "end_time": "00:09.5",
+        "reason": "Common student complaint about teachers, highly relatable.",
+        "scene_label": "STORY",
+        "clip_type": "speech",
+        "visual_description": "Young man talking, making a slightly displeased face, then laughing.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": null
+      },
+      {
+        "video_index": 2,
+        "start_time": "00:10.5",
+        "end_time": "00:15.0",
+        "reason": "Universal student complaint about excessive homework, highly relatable.",
+        "scene_label": "STORY",
+        "clip_type": "speech",
+        "visual_description": "Young man talking, looking slightly annoyed.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": null
+      },
+      {
+        "video_index": 2,
+        "start_time": "00:22.0",
+        "end_time": "00:26.5",
+        "reason": "Specific complaint about long school hours, interesting for comparison with other systems.",
+        "scene_label": "STORY",
+        "clip_type": "speech",
+        "visual_description": "Young man talking, looking thoughtful and a bit tired.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": null
+      }
+    ],
+    "hook_score": 8,
+    "confidence": 0.9,
+    "visual_risk": "none",
+    "suggested_music_mood": "upbeat"
+  }
 }

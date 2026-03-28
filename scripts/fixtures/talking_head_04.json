@@ -8,9 +8,82 @@
   "audio_map": null,
   "voiceover_data": null,
   "expected": {
-    "clip_count": [3, 10],
-    "total_duration": [15, 60]
+    "clip_count": [
+      3,
+      10
+    ],
+    "total_duration": [
+      15,
+      60
+    ]
   },
   "threshold_overrides": {},
-  "baseline": null
+  "baseline": {
+    "clip_candidates": [
+      {
+        "video_index": 1,
+        "start_time": "00:00.5",
+        "end_time": "00:05.0",
+        "reason": "Сильный и интригующий хук, который сразу привлекает внимание к необычной теме.",
+        "scene_label": "HOOK",
+        "clip_type": "speech",
+        "visual_description": "Женщина с кудрявыми волосами крупным планом, улыбается.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": null
+      },
+      {
+        "video_index": 1,
+        "start_time": "00:05.3",
+        "end_time": "00:17.5",
+        "reason": "Развитие темы хука, объяснение проблемы бруксизма в Германии и ее психологических корней.",
+        "scene_label": "STORY",
+        "clip_type": "speech",
+        "visual_description": "Женщина объясняет, жестикулируя руками, сжимает кулаки.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": null
+      },
+      {
+        "video_index": 1,
+        "start_time": "00:17.6",
+        "end_time": "00:26.5",
+        "reason": "Контрастное объяснение другой стоматологической проблемы (кариес) в Израиле и ее связи с образом жизни.",
+        "scene_label": "STORY",
+        "clip_type": "speech",
+        "visual_description": "Женщина улыбается, жестикулирует рукой.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": null
+      },
+      {
+        "video_index": 1,
+        "start_time": "00:26.9",
+        "end_time": "00:34.5",
+        "reason": "Установление экспертности спикера, что повышает доверие к предыдущим заявлениям.",
+        "scene_label": "PIVOT",
+        "clip_type": "speech",
+        "visual_description": "Женщина говорит, жестикулирует руками.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": null
+      },
+      {
+        "video_index": 1,
+        "start_time": "00:40.5",
+        "end_time": "00:51.0",
+        "reason": "Юмористическая и запоминающаяся рекомендация, которая завершает обсуждение проблемы бруксизма.",
+        "scene_label": "CLOSING",
+        "clip_type": "speech",
+        "visual_description": "Женщина улыбается, указывает пальцем на челюсть, затем широко разводит руки.",
+        "matched_voiceover_segment": null,
+        "match_reason": null,
+        "unmatched_text_overlay": null
+      }
+    ],
+    "hook_score": 9,
+    "confidence": 0.95,
+    "visual_risk": "none",
+    "suggested_music_mood": "upbeat"
+  }
 }
