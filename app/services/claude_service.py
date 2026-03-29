@@ -340,11 +340,16 @@ async def classify_feedback(feedback_text: str, api_key: str) -> dict:
     )
 
     try:
-        result = json.loads(response.content[0].text)
+        raw = response.content[0].text.strip()
+        # Strip markdown code fences if present
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
+            raw = raw.rsplit("```", 1)[0].strip()
+        result = json.loads(raw)
         return {
             "gemini_instruction": result.get("gemini_instruction"),
             "director_instruction": result.get("director_instruction"),
         }
-    except (json.JSONDecodeError, IndexError, KeyError):
-        logger.warning("Failed to parse Haiku classification, using fallback")
+    except (json.JSONDecodeError, IndexError, KeyError) as e:
+        logger.warning("Failed to parse Haiku classification: %s | raw: %s", e, response.content[0].text[:200])
         return {"gemini_instruction": feedback_text, "director_instruction": None}
