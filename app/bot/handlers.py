@@ -1418,6 +1418,22 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
                     else:
                         used_segments.add(clip.matched_voiceover_segment)
 
+            # Drop unmatched broll — voiceover drives montage, unmatched broll has no audio
+            before_count = len(clips)
+            clips = [c for c in clips if not (c.clip_type == "broll" and c.matched_voiceover_segment is None)]
+            dropped = before_count - len(clips)
+            if dropped:
+                logger.info("[Filter] Dropped %d unmatched broll clips (voiceover drives montage)", dropped)
+
+            # Reorder: broll first (sorted by voiceover segment), then speech
+            broll_clips = sorted(
+                [c for c in clips if c.clip_type == "broll" and c.matched_voiceover_segment is not None],
+                key=lambda c: c.matched_voiceover_segment,
+            )
+            speech_clips = [c for c in clips if c.clip_type == "speech"]
+            clips = broll_clips + speech_clips
+            logger.info("[Reorder] %d broll (voiceover) + %d speech → broll first", len(broll_clips), len(speech_clips))
+
             # Diagnostic logging
             matched = sum(1 for c in clips if c.matched_voiceover_segment is not None)
             broll_count = sum(1 for c in clips if c.clip_type == "broll")

@@ -671,6 +671,16 @@ class CreatomateService:
                     # Safety: audio trim_duration never exceeds broll duration
                     trim_dur = min(seg_duration, adjusted_duration)
 
+                    # Snap to last complete word boundary to avoid mid-word cuts
+                    if voiceover_words and trim_dur < seg_duration:
+                        complete_words = [
+                            w for w in voiceover_words
+                            if w["start"] >= seg_start and w["end"] <= seg_start + trim_dur
+                        ]
+                        if complete_words:
+                            trim_dur = complete_words[-1]["end"] - seg_start + 0.15
+                            logger.info("[Word snap] clip=%d: trim_dur=%.2f (after '%s')", i, trim_dur, complete_words[-1]["word"])
+
                     audio_el = {
                         "type": "audio",
                         "track": 5,
@@ -690,8 +700,7 @@ class CreatomateService:
                     if karaoke and voiceover_words:
                         seg_words = [
                             w for w in voiceover_words
-                            if w["start"] >= seg_start and w["start"] < seg_end
-                            and (w["start"] - seg_start) < trim_dur
+                            if w["start"] >= seg_start and w["end"] <= seg_start + trim_dur
                         ]
                         if seg_words:
                             phrases = _group_whisper_phrases(seg_words)
