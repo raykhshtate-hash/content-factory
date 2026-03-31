@@ -16,6 +16,128 @@ logger = logging.getLogger(__name__)
 FILLER_WORDS = {"э", "эм", "ум"}
 
 
+# ── Voiceover Segment Refinement ──────────────────────────────────
+
+def refine_voiceover_segments(
+    segments: list[dict],
+    words: list[dict],
+    min_duration: float = 3.0,
+    max_duration: float = 12.0,
+) -> list[dict]:
+    """Re-segment voiceover using word-level phrase boundary detection.
+
+    Whisper segments rely on long pauses that may not exist in
+    fast-paced speech.  This detects phrase boundaries via two signals:
+
+    1. **Real gaps** between words (actual silence in the audio).
+    2. **Hidden pauses** — Whisper absorbs trailing silence into the
+       preceding word's duration, making it abnormally long.  Words
+       whose duration exceeds the median by a large margin signal a
+       natural phrase end.
+
+    Short resulting segments (< *min_duration*) are merged forward
+    into the next segment (transition phrases usually introduce the
+    next topic).  A *max_duration* fallback splits any remaining
+    overlong segments at the best word boundary.
+    """
+    if not words or not segments:
+        return segments
+
+    # Filter zero-duration Whisper glitches
+    valid = [w for w in words if w["end"] > w["start"]]
+    if len(valid) < 2:
+        return segments
+
+    # ── Step 1: detect phrase boundaries ──
+    durations = sorted(w["end"] - w["start"] for w in valid)
+    median_dur = durations[len(durations) // 2]
+
+    HIDDEN_COEFF = 0.4  # fraction of excess word-duration treated as pause
+    GAP_THRESHOLD = 0.35
+
+    split_indices: list[int] = []  # index into *valid* — split BEFORE this word
+    for i in range(len(valid) - 1):
+        actual_gap = valid[i + 1]["start"] - valid[i]["end"]
+        hidden_pause = max(0.0, (valid[i]["end"] - valid[i]["start"]) - median_dur) * HIDDEN_COEFF
+        if actual_gap + hidden_pause >= GAP_THRESHOLD:
+            split_indices.append(i + 1)
+
+    if not split_indices:
+        return segments  # no phrase boundaries detected
+
+    # ── Step 2: build raw segments from split points ──
+    raw: list[dict] = []
+    prev = 0
+    for sp in split_indices:
+        chunk = valid[prev:sp]
+        if chunk:
+            raw.append({
+                "start": chunk[0]["start"],
+                "end": chunk[-1]["end"],
+                "text": " ".join(w["word"] for w in chunk).strip(),
+            })
+        prev = sp
+    chunk = valid[prev:]
+    if chunk:
+        raw.append({
+            "start": chunk[0]["start"],
+            "end": chunk[-1]["end"],
+            "text": " ".join(w["word"] for w in chunk).strip(),
+        })
+
+    if not raw:
+        return segments
+
+    # ── Step 3: merge short segments forward ──
+    merged: list[dict] = []
+    i = 0
+    while i < len(raw):
+        seg = raw[i]
+        dur = seg["end"] - seg["start"]
+        if dur < min_duration and i + 1 < len(raw):
+            nxt = raw[i + 1]
+            merged.append({
+                "start": seg["start"],
+                "end": nxt["end"],
+                "text": (seg["text"] + " " + nxt["text"]).strip(),
+            })
+            i += 2
+        else:
+            merged.append(seg)
+            i += 1
+
+    # Last segment too short → merge backward
+    if len(merged) > 1 and merged[-1]["end"] - merged[-1]["start"] < min_duration:
+        merged[-2]["end"] = merged[-1]["end"]
+        merged[-2]["text"] = (merged[-2]["text"] + " " + merged[-1]["text"]).strip()
+        merged.pop()
+
+    # ── Step 4: fallback — split any remaining overlong segment at midpoint ──
+    final: list[dict] = []
+    for seg in merged:
+        seg_dur = seg["end"] - seg["start"]
+        if seg_dur <= max_duration:
+            final.append(seg)
+            continue
+        seg_words = [w for w in valid if w["start"] >= seg["start"] - 0.01 and w["end"] <= seg["end"] + 0.01]
+        if len(seg_words) < 2:
+            final.append(seg)
+            continue
+        mid = (seg["start"] + seg["end"]) / 2
+        best_idx = min(range(1, len(seg_words)), key=lambda j: abs(seg_words[j]["start"] - mid))
+        left = seg_words[:best_idx]
+        right = seg_words[best_idx:]
+        if left and right:
+            final.append({"start": left[0]["start"], "end": left[-1]["end"],
+                          "text": " ".join(w["word"] for w in left).strip()})
+            final.append({"start": right[0]["start"], "end": right[-1]["end"],
+                          "text": " ".join(w["word"] for w in right).strip()})
+        else:
+            final.append(seg)
+
+    return final if final else segments
+
+
 def analyze_silence(
     word_timestamps: list[dict],
     gap_threshold: float = 1.0,
@@ -311,6 +433,14 @@ class WhisperService:
                             "start": float(w_start),
                             "end": float(w_end),
                         })
+
+            # Refine: detect phrase boundaries via hidden micro-pauses
+            raw_count = len(segments)
+            segments = refine_voiceover_segments(segments, words)
+            if len(segments) != raw_count:
+                logger.info("Voiceover segments refined: %d → %d", raw_count, len(segments))
+                for si, s in enumerate(segments):
+                    logger.info("  seg %d: [%.2f-%.2f] %s", si, s["start"], s["end"], s["text"][:50])
 
             logger.info("Voiceover transcribed: %d segments, %d words, %.1fs duration",
                         len(segments), len(words), vo_duration)

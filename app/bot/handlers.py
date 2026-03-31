@@ -1425,6 +1425,18 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
             if dropped:
                 logger.info("[Filter] Dropped %d unmatched broll clips (voiceover drives montage)", dropped)
 
+            # Extend broll clips to fit voiceover segments (prevents mid-sentence cuts)
+            for clip in clips:
+                if (clip.clip_type == "broll"
+                        and clip.matched_voiceover_segment is not None
+                        and 0 <= clip.matched_voiceover_segment < len(voiceover_segments)):
+                    seg = voiceover_segments[clip.matched_voiceover_segment]
+                    seg_dur = seg["end"] - seg["start"]
+                    if seg_dur > clip.trim_duration:
+                        logger.info("[VO extend] broll seg=%d: %.1fs → %.1fs",
+                                    clip.matched_voiceover_segment, clip.trim_duration, seg_dur)
+                        clip.trim_duration = seg_dur
+
             # Reorder: broll first (sorted by voiceover segment), then speech
             broll_clips = sorted(
                 [c for c in clips if c.clip_type == "broll" and c.matched_voiceover_segment is not None],
