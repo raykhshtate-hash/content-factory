@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed 02-02-PLAN.md
-last_updated: "2026-03-28T22:49:55.352Z"
-last_activity: 2026-03-28
+status: executing
+stopped_at: Completed 03-01-PLAN.md
+last_updated: "2026-04-01T08:50:49.585Z"
+last_activity: 2026-04-01
 progress:
   total_phases: 6
   completed_phases: 2
-  total_plans: 6
-  completed_plans: 6
+  total_plans: 9
+  completed_plans: 8
   percent: 0
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-28)
 
 **Core value:** Every reel should feel creatively directed — not just assembled — with feedback-driven iteration and a growing toolkit of visual effects.
-**Current focus:** Phase 02 — quality-harness-gemini-polish-basic-feedback
+**Current focus:** Phase 03 — animated-text-sfx
 
 ## Current Position
 
-Phase: 3
-Plan: Not started
-Status: Phase complete — ready for verification
-Last activity: 2026-03-28
+Phase: 03 (animated-text-sfx) — EXECUTING
+Plan: 3 of 3
+Status: Ready to execute
+Last activity: 2026-04-01
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -58,6 +58,8 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P03 | 3min | 2 tasks | 4 files |
 | Phase 02 P01 | 6min | 2 tasks | 11 files |
 | Phase 02 P02 | 1min | 1 tasks | 2 files |
+| Phase 03 P02 | 4min | 1 tasks | 3 files |
+| Phase 03 P01 | 3min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -80,6 +82,8 @@ Recent decisions affecting current work:
 - [Phase 02]: Storyboard smart uses analyze_video path matching production
 - [Phase 02]: Diversity instructions only in analyze_and_propose (talking_head), not storyboard
 - [Phase 02]: GEMINI_PROMPT_V bumped to 1.1 for dedup/diversity/anti-linear prompt changes
+- [Phase 03]: GCSService instantiated per apply_visual_blueprint call for SFX presigned URLs (sync, fresh per render)
+- [Phase 03]: ALLOWED_TEXT_ANIMATIONS = {fade, slide-up, typewriter, pop} for per-clip animation selection
 
 ### Pending Todos
 
@@ -91,6 +95,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-28T22:45:30.684Z
-Stopped at: Completed 02-02-PLAN.md
+Last session: 2026-04-01T08:50:49.581Z
+Stopped at: Completed 03-01-PLAN.md
 Resume file: None

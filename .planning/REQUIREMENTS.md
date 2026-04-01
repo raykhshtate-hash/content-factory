@@ -9,10 +9,10 @@ Requirements for Sprint 1+1.5 milestone. Each maps to roadmap phases.
 
 ### Visual Effects
 
-- [ ] **VFX-01**: Test renders validate safe/not-safe text animations (fade, slide-up, typewriter, pop) and zoom variants
-- [ ] **VFX-02**: Static popup text replaced with animated motion text, Visual Director chooses animation_type from safe enum
-- [ ] **VFX-03**: Python guardrails enforce fallback to fade for long text and duration caps on text animations
-- [ ] **VFX-04**: Unmatched B-roll clips display Gemini-generated text overlay (humor/question, 3-5 words) with fade in/out
+- [x] **VFX-01**: Test renders validate safe/not-safe text animations (fade, slide-up, typewriter, pop) and zoom variants
+- [x] **VFX-02**: Static popup text replaced with animated motion text, Visual Director chooses animation_type from safe enum
+- [x] **VFX-03**: Python guardrails enforce fallback to fade for long text and duration caps on text animations
+- [x] **VFX-04**: Unmatched B-roll clips display Gemini-generated text overlay (humor/question, 3-5 words) with fade in/out
 - [ ] **VFX-05**: PiP-lite overlay renders one video element in 2-3 fixed layouts with round window (border_radius clip)
 - [ ] **VFX-06**: PiP-lite is brief-driven — triggered by ScenePlan instruction
 - [ ] **VFX-07**: Split screen renders as separate content_mode with top/bottom layout (1080x960 + 1080x960) and labels
@@ -20,10 +20,10 @@ Requirements for Sprint 1+1.5 milestone. Each maps to roadmap phases.
 
 ### Audio
 
-- [ ] **AUD-01**: 5-10 SFX sounds sourced (whoosh_soft, whoosh_hard, pop_ui, click_cut, swoosh_slide, fade_soft) from Pixabay
-- [ ] **AUD-02**: SFX files uploaded to GCS with presigned URLs
-- [ ] **AUD-03**: Hardcoded SFX_MAP in creatomate_service.py maps transitions to sounds (wipe→whoosh, slide→swoosh, fade→fade_soft, sticker→pop, hard_cut→click)
-- [ ] **AUD-04**: SFX audio elements render on dedicated track, timed to transition timing
+- [x] **AUD-01**: 5-10 SFX sounds sourced (whoosh_soft, whoosh_hard, pop_ui, click_cut, swoosh_slide, fade_soft) from Pixabay
+- [x] **AUD-02**: SFX files uploaded to GCS with presigned URLs
+- [x] **AUD-03**: Hardcoded SFX_MAP in creatomate_service.py maps transitions to sounds (wipe→whoosh, slide→swoosh, fade→fade_soft, sticker→pop, hard_cut→click)
+- [x] **AUD-04**: SFX audio elements render on dedicated track, timed to transition timing
 
 ### Pipeline
 
@@ -102,18 +102,18 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| VFX-01 | Phase 3 | Pending |
-| VFX-02 | Phase 3 | Pending |
-| VFX-03 | Phase 3 | Pending |
-| VFX-04 | Phase 3 | Pending |
+| VFX-01 | Phase 3 | Complete |
+| VFX-02 | Phase 3 | Complete |
+| VFX-03 | Phase 3 | Complete |
+| VFX-04 | Phase 3 | Complete |
 | VFX-05 | Phase 6 | Pending |
 | VFX-06 | Phase 6 | Pending |
 | VFX-07 | Phase 6 | Pending |
 | VFX-08 | Phase 6 | Pending |
-| AUD-01 | Phase 3 | Pending |
-| AUD-02 | Phase 3 | Pending |
-| AUD-03 | Phase 3 | Pending |
-| AUD-04 | Phase 3 | Pending |
+| AUD-01 | Phase 3 | Complete |
+| AUD-02 | Phase 3 | Complete |
+| AUD-03 | Phase 3 | Complete |
+| AUD-04 | Phase 3 | Complete |
 | PIPE-01 | Phase 4 | Pending |
 | PIPE-02 | Phase 4 | Pending |
 | PIPE-03 | Phase 4 | Pending |
