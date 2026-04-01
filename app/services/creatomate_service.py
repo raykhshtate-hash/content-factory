@@ -12,6 +12,7 @@ Quality modes:
 
 import json
 import logging
+import random
 from dataclasses import dataclass
 import httpx
 from tenacity import retry, retry_if_exception_type, wait_exponential, stop_after_attempt
@@ -144,6 +145,33 @@ def _build_sticker_anim(anim_type: str, is_exit: bool) -> dict:
     if is_exit:
         anim["reversed"] = True
     return anim
+
+
+# ── SFX mapping (transition type -> GCS URIs) ──────────────────
+SFX_MAP: dict[str, list[str]] = {
+    "wipe": ["gs://romina-content-factory-489121/sfx/whoosh_1.mp3", "gs://romina-content-factory-489121/sfx/whoosh_2.mp3", "gs://romina-content-factory-489121/sfx/whoosh_3.mp3"],
+    "circular-wipe": ["gs://romina-content-factory-489121/sfx/whoosh_1.mp3", "gs://romina-content-factory-489121/sfx/whoosh_2.mp3", "gs://romina-content-factory-489121/sfx/whoosh_3.mp3"],
+    "color-wipe": ["gs://romina-content-factory-489121/sfx/whoosh_1.mp3", "gs://romina-content-factory-489121/sfx/whoosh_2.mp3", "gs://romina-content-factory-489121/sfx/whoosh_3.mp3"],
+    "film-roll": ["gs://romina-content-factory-489121/sfx/whoosh_1.mp3", "gs://romina-content-factory-489121/sfx/whoosh_2.mp3", "gs://romina-content-factory-489121/sfx/whoosh_3.mp3"],
+    "slide": ["gs://romina-content-factory-489121/sfx/swoosh_1.mp3", "gs://romina-content-factory-489121/sfx/swoosh_2.mp3", "gs://romina-content-factory-489121/sfx/swoosh_3.mp3"],
+    "rotate-slide": ["gs://romina-content-factory-489121/sfx/swoosh_1.mp3", "gs://romina-content-factory-489121/sfx/swoosh_2.mp3", "gs://romina-content-factory-489121/sfx/swoosh_3.mp3"],
+    "shift": ["gs://romina-content-factory-489121/sfx/swoosh_1.mp3", "gs://romina-content-factory-489121/sfx/swoosh_2.mp3", "gs://romina-content-factory-489121/sfx/swoosh_3.mp3"],
+    "squash": ["gs://romina-content-factory-489121/sfx/pop_1.mp3", "gs://romina-content-factory-489121/sfx/pop_2.mp3", "gs://romina-content-factory-489121/sfx/pop_3.mp3"],
+    "sticker_enter": ["gs://romina-content-factory-489121/sfx/pop_1.mp3", "gs://romina-content-factory-489121/sfx/pop_2.mp3", "gs://romina-content-factory-489121/sfx/pop_3.mp3"],
+    "fade": ["gs://romina-content-factory-489121/sfx/whoosh_1.mp3", "gs://romina-content-factory-489121/sfx/whoosh_2.mp3", "gs://romina-content-factory-489121/sfx/whoosh_3.mp3"],
+    "hard_cut": [],
+}
+SFX_VOLUME = "20%"
+SFX_DURATION = 0.8
+SFX_FADE_OUT = 0.2
+
+
+def _pick_sfx(event_type: str) -> str | None:
+    """Pick random SFX GCS URI for a transition/event type. Returns None if no mapping."""
+    pool = SFX_MAP.get(event_type, [])
+    if not pool:
+        return None
+    return random.choice(pool)
 
 
 def _group_whisper_phrases(words: list[dict], max_chars: int = 15) -> list[dict]:
@@ -390,6 +418,53 @@ def apply_visual_blueprint(
             }
             elements.append(sticker_el)
             sticker_idx += 1
+
+    # ── SFX audio elements (track 6) ──
+    sfx_elements: list[dict] = []
+    for clip_info in blueprint.get("clips", []):
+        idx = clip_info.get("index", 0)
+        transition = clip_info.get("transition")
+        if transition is not None and 0 < idx < len(clip_render_starts):
+            sfx_uri = _pick_sfx(transition["type"])
+            if sfx_uri:
+                try:
+                    from app.services.gcs_service import GCSService
+                    gcs = GCSService()
+                    sfx_url = gcs.generate_presigned_url(sfx_uri)
+                    sfx_elements.append({
+                        "type": "audio",
+                        "track": 6,
+                        "time": clip_render_starts[idx],
+                        "source": sfx_url,
+                        "volume": SFX_VOLUME,
+                        "duration": SFX_DURATION,
+                        "audio_fade_out": SFX_FADE_OUT,
+                    })
+                except Exception as e:
+                    logger.warning("SFX skipped for %s: %s", transition["type"], e)
+
+    # ── SFX for sticker entrances ──
+    sticker_track_els = [el for el in elements if el.get("track") == 4 and el.get("type") == "image"]
+    for sticker_el in sticker_track_els:
+        sfx_uri = _pick_sfx("sticker_enter")
+        if sfx_uri:
+            try:
+                from app.services.gcs_service import GCSService
+                gcs = GCSService()
+                sfx_url = gcs.generate_presigned_url(sfx_uri)
+                sfx_elements.append({
+                    "type": "audio",
+                    "track": 6,
+                    "time": sticker_el.get("time", 0),
+                    "source": sfx_url,
+                    "volume": SFX_VOLUME,
+                    "duration": SFX_DURATION,
+                    "audio_fade_out": SFX_FADE_OUT,
+                })
+            except Exception as e:
+                logger.warning("SFX skipped for sticker_enter: %s", e)
+
+    elements.extend(sfx_elements)
 
     return elements, transition_count
 
