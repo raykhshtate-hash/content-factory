@@ -1374,6 +1374,11 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
                 ]
                 if clip_words:
                     ctx["speech_text"] = " ".join(w["word"] for w in clip_words)
+            # D-09: pass unmatched_text_overlay from Gemini ClipCandidate for broll clips
+            if clip.clip_type == "broll" and candidates and i < len(candidates):
+                overlay_text = candidates[i].get("unmatched_text_overlay") if isinstance(candidates[i], dict) else getattr(candidates[i], "unmatched_text_overlay", None)
+                if overlay_text:
+                    ctx["unmatched_text_overlay"] = overlay_text
             clip_contexts.append(ctx)
 
     logger.debug("clip_descriptions for Visual Director: %s", clip_descriptions)

@@ -166,6 +166,31 @@ SFX_DURATION = 0.8
 SFX_FADE_OUT = 0.2
 
 
+# ── Text animation presets ─────────────────────────────────────
+TEXT_ANIM_MAP: dict[str, dict[str, dict]] = {
+    "fade": {
+        "enter": {"type": "fade", "duration": 0.4},
+        "exit": {"type": "fade", "time": "end", "duration": 0.3, "reversed": True},
+    },
+    "slide-up": {
+        "enter": {"type": "text-slide", "scope": "split-clip", "split": "word",
+                  "direction": "up", "duration": 0.6, "easing": "quadratic-out"},
+        "exit": {"type": "fade", "time": "end", "duration": 0.3, "reversed": True},
+    },
+    "typewriter": {
+        "enter": {"type": "text-typewriter", "scope": "split-clip", "split": "character",
+                  "duration": 1.5},
+        "exit": {"type": "fade", "time": "end", "duration": 0.3, "reversed": True},
+    },
+    "pop": {
+        "enter": {"type": "text-appear", "scope": "split-clip", "split": "word",
+                  "duration": 0.5},
+        "exit": {"type": "fade", "time": "end", "duration": 0.3, "reversed": True},
+    },
+}
+TEXT_POPUP_TRACK = 7
+
+
 def _pick_sfx(event_type: str) -> str | None:
     """Pick random SFX GCS URI for a transition/event type. Returns None if no mapping."""
     pool = SFX_MAP.get(event_type, [])
@@ -465,6 +490,83 @@ def apply_visual_blueprint(
                 logger.warning("SFX skipped for sticker_enter: %s", e)
 
     elements.extend(sfx_elements)
+
+    # ── Text popup elements (track 7) ──
+    text_popup_elements: list[dict] = []
+    for tp in blueprint.get("text_popups", []):
+        clip_idx = tp.get("clip_index", 0)
+        text = tp.get("text", "")
+        if not text or clip_idx < 0 or clip_idx >= len(clip_render_starts):
+            continue
+
+        anim_type = tp.get("animation_type", "fade")
+        anim_config = TEXT_ANIM_MAP.get(anim_type, TEXT_ANIM_MAP["fade"])
+
+        # Duration: clip duration minus 0.5s buffer, min 2s, max 4s
+        clip_dur = clip_durations[clip_idx] if clip_idx < len(clip_durations) else 3.0
+        popup_duration = max(2.0, min(4.0, clip_dur - 0.5))
+
+        text_popup_elements.append({
+            "type": "text",
+            "track": TEXT_POPUP_TRACK,
+            "time": clip_render_starts[clip_idx] + 0.3,
+            "duration": popup_duration,
+            "text": text,
+            "x": tp.get("x", "50%"),
+            "y": tp.get("y", "40%"),
+            "width": "80%",
+            "height": "15%",
+            "x_alignment": "50%",
+            "y_alignment": "50%",
+            "font_family": blueprint.get("font_family", "Montserrat"),
+            "font_weight": "700",
+            "font_size": "7 vmin",
+            "fill_color": "#FFFFFF",
+            "stroke_color": "#000000",
+            "stroke_width": "1.6 vmin",
+            "background_color": "rgba(0,0,0,0.4)",
+            "background_x_padding": "30%",
+            "background_y_padding": "30%",
+            "background_border_radius": "20%",
+            "animations": [
+                {**anim_config["enter"]},
+                {**anim_config["exit"]},
+            ],
+        })
+    elements.extend(text_popup_elements)
+
+    # ── Karaoke subtitle animations ──
+    clip_anim_types = {}
+    for ci in blueprint.get("clips", []):
+        clip_anim_types[ci.get("index", 0)] = ci.get("animation_type", "fade")
+
+    for el in elements:
+        if el.get("type") != "text":
+            continue
+        el_track = el.get("track")
+        if el_track not in (2, 3):
+            continue
+        if el.get("animations"):
+            continue
+        # transcript_source karaoke: simple fade only (D-04)
+        if el.get("transcript_source"):
+            el["animations"] = [
+                {"type": "fade", "duration": 0.3},
+                {"type": "fade", "time": "end", "duration": 0.2, "reversed": True},
+            ]
+        else:
+            # Whisper popup subtitles: use animation_type from nearest clip
+            el_time = el.get("time", 0)
+            best_clip_idx = 0
+            for ci_idx, start in enumerate(clip_render_starts):
+                if start <= el_time:
+                    best_clip_idx = ci_idx
+            anim_type = clip_anim_types.get(best_clip_idx, "fade")
+            anim_config = TEXT_ANIM_MAP.get(anim_type, TEXT_ANIM_MAP["fade"])
+            el["animations"] = [
+                {**anim_config["enter"]},
+                {**anim_config["exit"]},
+            ]
 
     return elements, transition_count
 
