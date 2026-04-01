@@ -37,6 +37,10 @@ ALLOWED_STICKER_ANIMATIONS = {
     "circular-wipe", "film-roll", "shift", "squash", "rotate-slide",
 }
 
+ALLOWED_TEXT_ANIMATIONS = {"fade", "slide-up", "typewriter", "pop"}
+MAX_TEXT_POPUPS = 4          # D-16: hard cap to prevent visual clutter
+LONG_TEXT_THRESHOLD = 20     # D-14: chars above which typewriter -> fade
+
 SYSTEM_PROMPT = """\
 You are a JSON-only API. Respond with a single JSON object. No text before or after. No analysis, no markdown, no explanation. First character of your response must be {{
 
@@ -304,6 +308,35 @@ Sticker overlays:
 отличается от предыдущих видео.
 
 Верни выбранный цвет в поле subtitle_color.
+=== ИНСТРУМЕНТ 3: АНИМАЦИЯ ТЕКСТА (animation_type) ===
+
+Для каждого клипа выбери тип анимации текстовых overlay-ев (караоке, попапы).
+
+Доступные типы:
+- fade: плавное появление (универсальный, лучший для speech клипов и длинного текста)
+- slide-up: текст выезжает снизу построчно (энергичный, чистый)
+- typewriter: печатающая машинка посимвольно (только для текста < 20 символов!)
+- pop: слова появляются по одному с эффектом (быстрый, панчевый — для broll)
+
+Правила animation_type:
+- speech клипы → fade или slide-up
+- broll короткий → pop
+- broll длинный → fade
+- typewriter ТОЛЬКО если текст < 20 символов (иначе слишком долго)
+
+=== ИНСТРУМЕНТ 4: ТЕКСТОВЫЕ ПОПАПЫ (text_popups) ===
+
+Для клипов broll с доступным text overlay — создай текстовый попап.
+Это короткий текст (3-5 слов) поверх видео, добавляющий юмор или вопрос.
+
+Правила text_popups:
+- Максимум {max_text_popups} попапов на весь рилс
+- Используй текст из "Text overlay доступен" в контексте клипа (НЕ придумывай свой)
+- x: позиция по горизонтали (10-90%, по умолчанию 50%)
+- y: позиция по вертикали (10-65% — НИЖЕ 65% НЕЛЬЗЯ, там караоке)
+- Выбирай x/y исходя из содержимого кадра (не на лицо, не на важные объекты)
+- animation_type: один из fade, slide-up, typewriter, pop
+
 {style_params_block}
 === ФОРМАТ ОТВЕТА (JSON) ===
 
@@ -315,15 +348,18 @@ Sticker overlays:
   "clips": [
     {{
       "index": 0,
-      "transition": null
+      "transition": null,
+      "animation_type": "fade"
     }},
     {{
       "index": 1,
-      "transition": {{"type": "fade"}}
+      "transition": {{"type": "fade"}},
+      "animation_type": "slide-up"
     }},
     {{
       "index": 2,
-      "transition": {{"type": "slide", "direction": "left"}}
+      "transition": {{"type": "slide", "direction": "left"}},
+      "animation_type": "pop"
     }}
   ],
   "overlays": [
@@ -339,11 +375,21 @@ Sticker overlays:
       "width": "22%",
       "height": "22%"
     }}
+  ],
+  "text_popups": [
+    {{
+      "clip_index": 2,
+      "text": "Короткая фраза",
+      "animation_type": "pop",
+      "x": "50%",
+      "y": "35%"
+    }}
   ]
 }}
 
 Количество объектов в clips ДОЛЖНО равняться количеству входных клипов.
-overlays — отдельный массив, НЕ внутри clips. Может быть пустым []."""
+overlays — отдельный массив, НЕ внутри clips. Может быть пустым [].
+text_popups — попапы для broll клипов с доступным text overlay. Может быть пустым []."""
 
 
 def _make_fallback(num_clips: int) -> dict:
@@ -352,10 +398,11 @@ def _make_fallback(num_clips: int) -> dict:
         "font_family": "Montserrat",
         "subtitle_color": "#FFFFFF",
         "clips": [
-            {"index": i, "transition": None}
+            {"index": i, "transition": None, "animation_type": "fade"}
             for i in range(num_clips)
         ],
         "overlays": [],
+        "text_popups": [],
     }
 
 
@@ -402,9 +449,15 @@ def _validate_blueprint(
                 if d in ALLOWED_DIRECTIONS:
                     clean_t["direction"] = d
 
+        # Validate animation_type for text overlays
+        anim_type = clip.get("animation_type", "fade")
+        if anim_type not in ALLOWED_TEXT_ANIMATIONS:
+            anim_type = "fade"
+
         cleaned_clips.append({
             "index": idx,
             "transition": clean_t,
+            "animation_type": anim_type,
         })
 
     # ── Validate overlays ──
@@ -616,6 +669,46 @@ def _validate_blueprint(
     if not re.fullmatch(r"#[0-9A-Fa-f]{6}", sub_color):
         sub_color = "#FFFFFF"
 
+    # ── Validate text_popups ──
+    raw_popups = blueprint.get("text_popups") or []
+    clean_popups: list[dict] = []
+
+    for tp in raw_popups:
+        if not isinstance(tp, dict):
+            continue
+        if len(clean_popups) >= MAX_TEXT_POPUPS:
+            break
+
+        clip_index = tp.get("clip_index")
+        if clip_index is None:
+            continue
+
+        text = tp.get("text", "")
+        if not text:
+            continue
+
+        # Truncate text to 50 chars
+        text = text[:50]
+
+        anim = tp.get("animation_type", "fade")
+        if anim not in ALLOWED_TEXT_ANIMATIONS:
+            anim = "fade"
+
+        # D-14: long text with typewriter falls back to fade
+        if len(text) > LONG_TEXT_THRESHOLD and anim == "typewriter":
+            anim = "fade"
+
+        x = _parse_pct(tp.get("x", "50%"), 10, 90, "50%")
+        y = _parse_pct(tp.get("y", "40%"), 10, 65, "40%")
+
+        clean_popups.append({
+            "clip_index": clip_index,
+            "text": text,
+            "animation_type": anim,
+            "x": x,
+            "y": y,
+        })
+
     result = {
         "overall_style": blueprint.get("overall_style", "clean"),
         "font_family": font,
@@ -623,6 +716,7 @@ def _validate_blueprint(
         "reasoning": blueprint.get("reasoning", ""),
         "clips": cleaned_clips,
         "overlays": clean_overlays,
+        "text_popups": clean_popups,
     }
 
     return result
@@ -717,9 +811,30 @@ async def get_visual_blueprint(
 
     style_params_block = "\n".join(style_lines) if style_lines else ""
 
+    # Build clip contexts block with text overlay availability
+    ctx_overlay_lines = []
+    if clip_contexts:
+        for i, ctx in enumerate(clip_contexts):
+            if not isinstance(ctx, dict):
+                continue
+            clip_type = ctx.get("clip_type", "")
+            overlay_text = ctx.get("unmatched_text_overlay", "")
+            if overlay_text and clip_type == "broll":
+                desc = ctx.get("clip_description", ctx.get("description", ""))
+                ctx_overlay_lines.append(
+                    f"- Клип {i} (broll): {desc}. "
+                    f"Text overlay доступен: '{overlay_text}'"
+                )
+    ctx_overlay_block = (
+        "\nКОНТЕКСТ КЛИПОВ (text overlay доступен для broll):\n"
+        + "\n".join(ctx_overlay_lines)
+    ) if ctx_overlay_lines else ""
+
     prompt_text = SYSTEM_PROMPT.replace("{render_mode}", render_mode)
     prompt_text = prompt_text.replace("{clip_descriptions_block}", desc_block)
     prompt_text = prompt_text.replace("{style_params_block}", style_params_block)
+    prompt_text = prompt_text.replace("{max_text_popups}", str(MAX_TEXT_POPUPS))
+    prompt_text += ctx_overlay_block
 
     clips_block = "\n".join(
         f"- Клип {c['index']}: {c['duration']:.1f} сек"
