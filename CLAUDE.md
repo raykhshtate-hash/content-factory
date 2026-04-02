@@ -29,7 +29,9 @@ Video has audio (speaker on camera). Gemini selects best clips with timestamps. 
 Numbered clips (01.mp4, 02.mp4...) + `voiceover.mp3`. Video `volume: "0%"`. Single karaoke on track 3 with `transcript_source: "voiceover"`. Audio element `id="voiceover"` on track 2. Voiceover processed: silence removal → dynamic speedup (capped 1.5x) → re-speed for transition overlap. Whisper candidate spans for sticker placement. Stickers almost never (max 1).
 
 ### storyboard smart (INBOX/storyboard/, unnumbered files)
-Unnumbered clips + `voiceover.mp3`. Routes through Gemini pipeline (like talking_head). All clips = broll. Per-clip voiceover on track 5.
+Unnumbered clips + `voiceover.mp3`. Two-pass Gemini: Pass 1 (Flash) discovers story, Pass 2 (Pro) selects clips. Montage (vo ≤15s, ≤3 segs): spread voiceover across timeline, music loop track 8, ambient 15%. Narrative: per-clip voiceover (reuses hybrid logic). Visual Director: Sonnet for storyboard, Opus for TH/hybrid.
+- `/remix` — same clips, fresh creative | `/addclip` — Gemini search + manual fallback → auto-render
+- Delivery buttons: "Перемонтаж" + "Добавить кадр" (Cloud Run webhook)
 
 ### Hybrid Mode (talking_head + voiceover)
 Per-clip voiceover architecture. Each matched broll gets its own audio element.
@@ -41,6 +43,16 @@ Clip dataclass: `matched_voiceover_segment` field added.
 
 ### Clip Pre-buffer
 **Gap-aware pre-buffer**: 0.5s capped to actual inter-clip gap for same-source clips. Prevents audio replay during transitions.
+
+### Clip Duration Clamp
+`_candidates_to_clips` clamps `end = min(end, src_dur - 0.5)` via ffprobe. Prevents black frames from Gemini timestamps beyond source length.
+
+### Pipeline Shortcuts
+- **GCS reuse**: `/ready` compares video filenames with prev item → skip upload if match (+ voiceover_gcs_uri).
+- **Stale auto-cancel**: items in processing_video/analyzing >10 min → cancelled on next `/ready`.
+- **`/ready` without `/reels`**: auto-creates item if no `awaiting_footage`.
+- **Music loops**: track 8, Splice library, `duration: total_duration`, `audio_fade_out: 2.0s`.
+- **Spread voiceover**: montage mode, per-segment audio elements evenly across timeline.
 
 ### B-roll Timeline Mapping
 `render_time = render_start + (source_time - trim_start)` — Gemini timecodes are in source timeline, not rendered output.
@@ -95,6 +107,7 @@ When the user pastes implementation or architecture instructions (from Antigravi
 - AI providers: only `openai`, `elevenlabs`, `stabilityai`.
 - `background_color: "transparent"` required for AI sticker image elements.
 - Decoupled audio: talking_head + transitions → video muted track 1, audio track 2 clean cuts.
+- **Track map**: 1=video, 2=TH audio/storyboard voiceover, 3=karaoke, 4=stickers, 5=hybrid per-clip audio, 6=SFX, 7=text popups, 8=music loop.
 
 ### Gemini
 - `temperature=0` for deterministic results. Prompt is sensitive — test changes separately.

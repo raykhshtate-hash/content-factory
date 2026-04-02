@@ -97,6 +97,8 @@ async def process_creatomate_render(item_id: str, payload: dict):
         try:
             keyboard = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="✅ Одобрить", callback_data=f"approve:{item_id}")],
+                [InlineKeyboardButton(text="🔄 Перемонтаж", callback_data=f"remix:{item_id}")],
+                [InlineKeyboardButton(text="🎬 Добавить кадр", callback_data=f"addclip:{item_id}")],
                 [InlineKeyboardButton(text="✏️ Переделать", callback_data=f"redo:{item_id}")]
             ])
 

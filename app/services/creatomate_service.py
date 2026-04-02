@@ -54,63 +54,25 @@ QUALITY_PRESETS = {
 }
 
 # ── Karaoke subtitle styles by mood ─────────────────────────────
+# Premium karaoke styles: white base text + accent on active word + soft shadow (no harsh stroke)
+_BASE = {
+    "fill_color": "rgba(255,255,255,0.7)",
+    "font_weight": "600",
+    "font_style": "italic",
+    "stroke_color": "rgba(0,0,0,0.3)",
+    "stroke_width": "0.8 vmin",
+    "shadow_color": "rgba(0,0,0,0.5)",
+    "shadow_blur": "4 vmin",
+}
 KARAOKE_STYLES: dict[str, dict] = {
-    "energetic": {
-        "fill_color": "#FFFFFF",
-        "transcript_color": "#FF3232",
-        "font_weight": "700",
-        "stroke_color": "#000000",
-        "stroke_width": "2 vmin",
-    },
-    "calm": {
-        "fill_color": "rgba(255,255,255,0.7)",
-        "transcript_color": "#FFFFFF",
-        "font_weight": "400",
-        "shadow_color": "rgba(0,0,0,0.4)",
-        "shadow_blur": "3 vmin",
-    },
-    "humor": {
-        "fill_color": "#FFFFFF",
-        "transcript_color": "#FFE600",
-        "font_weight": "600",
-        "stroke_color": "#000000",
-        "stroke_width": "2.5 vmin",
-    },
-    "professional": {
-        "fill_color": "rgba(255,255,255,0.8)",
-        "transcript_color": "#FFFFFF",
-        "font_weight": "600",
-        "shadow_color": "rgba(0,0,0,0.5)",
-        "shadow_blur": "2 vmin",
-    },
-    "upbeat": {
-        "fill_color": "#FFFFFF",
-        "transcript_color": "#FF6B9D",
-        "font_weight": "600",
-        "stroke_color": "#000000",
-        "stroke_width": "2 vmin",
-    },
-    "dramatic": {
-        "fill_color": "#FFFFFF",
-        "transcript_color": "#FF4444",
-        "font_weight": "600",
-        "stroke_color": "#000000",
-        "stroke_width": "2 vmin",
-    },
-    "funny": {
-        "fill_color": "#FFFFFF",
-        "transcript_color": "#FFE600",
-        "font_weight": "600",
-        "stroke_color": "#000000",
-        "stroke_width": "2.5 vmin",
-    },
-    "chill": {
-        "fill_color": "rgba(255,255,255,0.7)",
-        "transcript_color": "#FFFFFF",
-        "font_weight": "400",
-        "shadow_color": "rgba(0,0,0,0.3)",
-        "shadow_blur": "3 vmin",
-    },
+    "energetic":    {**_BASE, "transcript_color": "#FFFFFF", "font_weight": "700"},
+    "calm":         {**_BASE, "transcript_color": "#F5F0EB"},
+    "humor":        {**_BASE, "transcript_color": "#FFE600", "font_weight": "700"},
+    "professional": {**_BASE, "transcript_color": "#FFFFFF"},
+    "upbeat":       {**_BASE, "transcript_color": "#FFFFFF", "font_weight": "700"},
+    "dramatic":     {**_BASE, "transcript_color": "#FFFFFF", "font_weight": "700"},
+    "funny":        {**_BASE, "transcript_color": "#FFE600", "font_weight": "700"},
+    "chill":        {**_BASE, "transcript_color": "#FFFFFF"},
 }
 
 # ── Transition presets (legacy, used by Gemini storyboard fallback) ──
@@ -189,6 +151,36 @@ TEXT_ANIM_MAP: dict[str, dict[str, dict]] = {
     },
 }
 TEXT_POPUP_TRACK = 7
+
+# ── Background music loops (mood -> GCS URIs) ────────────────
+_BUCKET = "gs://romina-content-factory-489121"
+MUSIC_LOOPS: dict[str, list[str]] = {
+    "chill": [
+        f"{_BUCKET}/loops/chill_warm_synth_long.mp3",    # 62s
+        f"{_BUCKET}/loops/chill_lofi_long.mp3",           # 55s
+        f"{_BUCKET}/loops/emotional_smooth_piano_3.mp3",  # 32s
+    ],
+    "energetic": [
+        f"{_BUCKET}/loops/energetic_acoustic_2.mp3",      # 21s
+        f"{_BUCKET}/loops/energetic_cosmic_synth_3.mp3",  # 16s
+        f"{_BUCKET}/loops/energetic_bright_chords_1.mp3", # 12s
+    ],
+    "emotional": [
+        f"{_BUCKET}/loops/emotional_piano_long.mp3",      # 42s
+        f"{_BUCKET}/loops/emotional_smooth_piano_3.mp3",  # 32s
+        f"{_BUCKET}/loops/emotional_coral_piano_2.mp3",   # 11s
+    ],
+}
+MUSIC_LOOP_VOLUME = "25%"
+MUSIC_LOOP_TRACK = 8
+
+
+def _pick_loop(mood: str | None) -> str | None:
+    """Pick a random music loop GCS URI matching the mood. Falls back to chill."""
+    if not mood:
+        mood = "chill"
+    pool = MUSIC_LOOPS.get(mood, MUSIC_LOOPS.get("chill", []))
+    return random.choice(pool) if pool else None
 
 
 def _pick_sfx(event_type: str) -> str | None:
@@ -343,6 +335,7 @@ def apply_visual_blueprint(
     clip_durations: list[float],
     anchored_overlays: list[dict] | None = None,
     clips: list[Clip] | None = None,
+    skip_sfx: bool = False,
 ) -> tuple[list[dict], int]:
     """Apply visual blueprint (transitions + sticker overlays) to elements.
 
@@ -446,7 +439,9 @@ def apply_visual_blueprint(
 
     # ── SFX audio elements (track 6) ──
     sfx_elements: list[dict] = []
-    for clip_info in blueprint.get("clips", []):
+    if skip_sfx:
+        logger.info("SFX skipped (montage mode)")
+    for clip_info in blueprint.get("clips", []) if not skip_sfx else []:
         idx = clip_info.get("index", 0)
         transition = clip_info.get("transition")
         if transition is not None and 0 < idx < len(clip_render_starts):
@@ -469,7 +464,7 @@ def apply_visual_blueprint(
                     logger.warning("SFX skipped for %s: %s", transition["type"], e)
 
     # ── SFX for sticker entrances ──
-    sticker_track_els = [el for el in elements if el.get("track") == 4 and el.get("type") == "image"]
+    sticker_track_els = [el for el in elements if el.get("track") == 4 and el.get("type") == "image"] if not skip_sfx else []
     for sticker_el in sticker_track_els:
         sfx_uri = _pick_sfx("sticker_enter")
         if sfx_uri:
@@ -631,6 +626,9 @@ class CreatomateService:
         per_clip_voiceover_url: str | None = None,
         font_family: str = "Montserrat",
         subtitle_color: str | None = None,
+        ambient_volume: str | None = None,
+        music_loop_url: str | None = None,
+        spread_voiceover: list[dict] | None = None,
     ) -> dict:
         """
         Build Creatomate source JSON (elements + metadata).
@@ -677,6 +675,9 @@ class CreatomateService:
             for td in transition_durations:
                 running += td
                 cumulative_offsets.append(running)
+        logger.info("Transition offsets: durations=%s, cumulative=%s (last=%.1f)",
+                     transition_durations, cumulative_offsets,
+                     cumulative_offsets[-1] if cumulative_offsets else 0.0)
 
         # Detect talking_head with transitions: same source, has transitions, no voiceover.
         # Audio must be decoupled to a separate track to prevent doubling during overlap.
@@ -721,7 +722,7 @@ class CreatomateService:
             if is_same_source_transitions:
                 video_el["volume"] = "0%"  # Audio decoupled to track 2
             elif voiceover_url:
-                video_el["volume"] = "0%"
+                video_el["volume"] = ambient_volume or "0%"
             elif voiceover_segments and clip.matched_voiceover_segment is not None:
                 video_el["volume"] = "0%"  # Per-clip: voiceover replaces broll ambient
             elif hybrid_voiceover_url and clip.clip_type == "broll":
@@ -795,7 +796,7 @@ class CreatomateService:
                             if "transcript_color" in text_el:
                                 text_el["fill_color"] = text_el.pop("transcript_color")
                             if subtitle_color:
-                                text_el["fill_color"] = subtitle_color
+                                text_el["transcript_color"] = subtitle_color
                             logger.debug(
                                 "Popup phrase: text=%r time=%.3f dur=%.3f | clip_trim=%.2f adj_trim=%.2f cur_time=%.2f phrase_start=%.2f clip_end=%.2f",
                                 phrase["text"][:20], phrase_time, phrase_dur,
@@ -826,7 +827,7 @@ class CreatomateService:
                     }
                     karaoke_el.update(style)
                     if subtitle_color:
-                        karaoke_el["fill_color"] = subtitle_color
+                        karaoke_el["transcript_color"] = subtitle_color
                     karaoke_elements.append(karaoke_el)
 
             # ── Per-clip voiceover audio + karaoke (new hybrid per-clip mode) ──
@@ -1017,8 +1018,60 @@ class CreatomateService:
         if cumulative_offsets:
             total_duration -= cumulative_offsets[-1]
 
-        if voiceover_url:
-            # Storyboard: voiceover audio track
+        if voiceover_url and spread_voiceover and len(spread_voiceover) > 1:
+            # Montage mode: spread voiceover segments across the timeline
+            num_segs = len(spread_voiceover)
+            spacing = total_duration / (num_segs + 1)
+
+            for si, seg in enumerate(spread_voiceover):
+                seg_start = seg["start"]
+                seg_end = seg["end"]
+                seg_dur = seg_end - seg_start
+                render_time = spacing * (si + 1) - seg_dur / 2  # center each segment
+                render_time = max(0, render_time)
+
+                vo_id = f"voiceover_{si}"
+                elements.append({
+                    "type": "audio",
+                    "id": vo_id,
+                    "track": 2,
+                    "time": render_time,
+                    "trim_start": seg_start,
+                    "trim_duration": seg_dur,
+                    "source": voiceover_url,
+                    "volume": "100%",
+                })
+
+                if karaoke:
+                    vo_karaoke = {
+                        "type": "text",
+                        "track": 3,
+                        "transcript_source": vo_id,
+                        "transcript_effect": "karaoke",
+                        "transcript_maximum_length": 15,
+                        "time": render_time,
+                        "duration": seg_dur + 0.5,
+                        "width": "90%",
+                        "height": "20%",
+                        "x": "50%",
+                        "y": "78%",
+                        "x_alignment": "50%",
+                        "y_alignment": "50%",
+                        "font_family": font_family,
+                        "font_weight": "700",
+                        "font_size": "6 vmin",
+                        "stroke_color": "#000000",
+                        "stroke_width": "1.6 vmin",
+                    }
+                    vo_karaoke.update(style)
+                    if subtitle_color:
+                        vo_karaoke["transcript_color"] = subtitle_color
+                    elements.append(vo_karaoke)
+
+            logger.info("Spread voiceover: %d segments across %.1fs timeline", num_segs, total_duration)
+
+        elif voiceover_url:
+            # Storyboard ordered / single-segment: voiceover as one track
             elements.append({
                 "type": "audio",
                 "id": "voiceover",
@@ -1028,7 +1081,6 @@ class CreatomateService:
                 "volume": "100%",
             })
 
-            # Single karaoke element for entire timeline, synced to voiceover
             if karaoke:
                 vo_karaoke = {
                     "type": "text",
@@ -1052,8 +1104,9 @@ class CreatomateService:
                 }
                 vo_karaoke.update(style)
                 if subtitle_color:
-                    vo_karaoke["fill_color"] = subtitle_color
+                    vo_karaoke["transcript_color"] = subtitle_color
                 elements.append(vo_karaoke)
+
         elif voiceover_segments and per_clip_voiceover_url:
             # Per-clip hybrid mode: audio elements already added in clip loop
             elements.extend(karaoke_elements)
@@ -1076,6 +1129,20 @@ class CreatomateService:
             elements.extend(karaoke_elements)
 
         # ── Final source JSON ─────────────────────────────────
+        # Background music loop (montage mode — after all voiceover/karaoke elements)
+        if music_loop_url:
+            elements.append({
+                "type": "audio",
+                "track": MUSIC_LOOP_TRACK,
+                "time": 0,
+                "duration": total_duration,  # Visual content duration (transitions subtracted)
+                "source": music_loop_url,
+                "volume": MUSIC_LOOP_VOLUME,
+                "audio_fade_out": 2.0,
+            })
+            logger.info("Music loop on track %d: volume=%s, duration=%.1fs (composition=%.1fs)",
+                        MUSIC_LOOP_TRACK, MUSIC_LOOP_VOLUME, current_time, total_duration)
+
         source = {
             "output_format": "mp4",
             "width": width,

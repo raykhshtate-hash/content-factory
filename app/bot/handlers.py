@@ -473,6 +473,81 @@ async def _get_duration_ffprobe(url: str) -> float:
         return 0.0
 
 
+@router.message(Command("addclip"))
+async def cmd_addclip(message: types.Message, state: FSMContext):
+    """Start add-clip flow: user describes a moment to find."""
+    # Find the latest rendered item
+    client = supabase_service._get_client()
+    result = await asyncio.to_thread(
+        lambda: client.table("content_items")
+        .select("id")
+        .eq("telegram_chat_id", message.chat.id)
+        .in_("status", ["pending_approval", "approved"])
+        .order("updated_at", desc=True)
+        .limit(1)
+        .execute()
+    )
+    items = result.data if result else []
+    if not items:
+        await message.answer("Нет рендеров. Сначала создай видео через /reels → /ready.")
+        return
+
+    await state.set_state(AddClipState.waiting_for_description)
+    await state.update_data(item_id=items[0]["id"])
+    await message.answer(
+        "🎬 Опиши момент, который хочешь добавить.\n"
+        "Например: «момент где дарят цветы» или «крупный план лица»"
+    )
+
+
+@router.message(Command("remix"))
+async def cmd_remix(message: types.Message):
+    """Show recent renders for re-mix (same clips, fresh creative)."""
+    client = supabase_service._get_client()
+    result = await asyncio.to_thread(
+        lambda: client.table("content_items")
+        .select("id,status,content_mode,analysis_mode,updated_at,analysis_result")
+        .eq("telegram_chat_id", message.chat.id)
+        .in_("status", ["pending_approval", "approved"])
+        .order("updated_at", desc=True)
+        .limit(5)
+        .execute()
+    )
+    items = result.data if result else []
+    if not items:
+        await message.answer("Нет доступных рендеров для перемонтажа.")
+        return
+
+    buttons = []
+    for it in items:
+        # Parse delivery time
+        raw_ts = it.get("updated_at", "")
+        try:
+            from datetime import datetime, timezone, timedelta
+            dt = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+            local_dt = dt.astimezone(timezone(timedelta(hours=3)))  # Israel/Germany timezone
+            time_str = local_dt.strftime("%d.%m %H:%M")
+        except Exception:
+            time_str = raw_ts[:16]
+
+        # Clip count from analysis
+        raw_analysis = it.get("analysis_result")
+        num_clips = 0
+        if raw_analysis:
+            analysis = json.loads(raw_analysis) if isinstance(raw_analysis, str) else raw_analysis
+            num_clips = len(analysis.get("clip_candidates", []))
+
+        mode = it.get("analysis_mode") or it.get("content_mode", "?")
+        label = f"🔄 {time_str} | {mode} | {num_clips} клипов"
+        buttons.append([InlineKeyboardButton(
+            text=label,
+            callback_data=f"remix:{it['id']}",
+        )])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await message.answer("Выбери рендер для перемонтажа:", reply_markup=keyboard)
+
+
 @router.message(Command("ready"))
 async def cmd_ready(message: types.Message):
     # 1. Idempotency Check
@@ -481,12 +556,38 @@ async def cmd_ready(message: types.Message):
     if not active_item:
         proc_item = await supabase_service.find_active_item(message.chat.id, "processing_video")
         analyzing_item = await supabase_service.find_active_item(message.chat.id, "analyzing")
-        if proc_item or analyzing_item:
-            await message.answer("⏳ Твое видео уже находится в процессе обработки! Пожалуйста, подожди.")
+        stuck_item = proc_item or analyzing_item
+        if stuck_item:
+            # Auto-cancel if stuck for more than 15 minutes
+            from datetime import datetime, timezone
+            updated = stuck_item.get("updated_at", "")
+            try:
+                ts = datetime.fromisoformat(updated.replace("Z", "+00:00"))
+                age_min = (datetime.now(timezone.utc) - ts).total_seconds() / 60
+            except Exception:
+                age_min = 999
+            if age_min < 10:
+                await message.answer("⏳ Твое видео уже находится в процессе обработки! Пожалуйста, подожди.")
+                return
+            # Stale — cancel and proceed
+            logger.warning("[Ready] Auto-cancelling stale item %s (age=%.0f min, status=%s)",
+                           stuck_item["id"], age_min, stuck_item.get("status"))
+            await supabase_service.update_item(stuck_item["id"], status="cancelled")
+
+        # Auto-create item so /ready works without /reels (fast retest)
+        try:
+            user_name = message.from_user.username or message.from_user.full_name or "unknown"
+            active_item = await supabase_service.create_content_item(
+                user_name=user_name,
+                chat_id=message.chat.id,
+                format="reels",
+                status="awaiting_footage",
+            )
+            logger.info("[Ready] Auto-created item %s for quick re-render", active_item["id"])
+        except Exception as e:
+            logger.error("[Ready] Failed to auto-create item: %s", e)
+            await message.answer("❌ Ошибка создания записи. Попробуй /reels → /ready.")
             return
-            
-        await message.answer("У тебя нет сценариев, ожидающих видео. Создай новый сценарий (например через /reels).")
-        return
 
     item_id = active_item["id"]
     await supabase_service.update_item(item_id, status="processing_video")
@@ -566,39 +667,108 @@ async def cmd_ready(message: types.Message):
     await update_progress(status_msg, 1,
         f"Найдено файлов: {len(all_files)} ({source_label})."
     )
-    
-    gcs_bucket = settings.GCS_BUCKET_NAME
-    gcs_uris = []
-    failed_files = []
 
-    for idx, file_meta in enumerate(all_files, 1):
-        file_id = file_meta['id']
-        file_name = file_meta['name']
-        gcs_path = f"footage/{item_id}/{uuid.uuid4().hex[:8]}_{file_name}"
+    # ── Reuse GCS files from previous item if same Drive files ──
+    reused_uris = None
+    reused_voiceover = None
+    current_video_files = [f for f in all_files if f['name'].lower().endswith(VIDEO_EXT)]
+    try:
+        current_file_names = sorted(f['name'] for f in current_video_files)
+        client = supabase_service._get_client()
+        prev_items = await asyncio.to_thread(
+            lambda: client.table("content_items")
+            .select("gcs_uris,voiceover_gcs_uri")
+            .eq("telegram_chat_id", message.chat.id)
+            .in_("status", ["pending_approval", "approved", "ready_for_render", "rendering", "delivering", "render_failed"])
+            .order("updated_at", desc=True)
+            .limit(3)
+            .execute()
+        )
+        logger.info("GCS reuse: found %d prev items, current files: %s",
+                    len(prev_items.data or []), current_file_names)
+        for prev in (prev_items.data or []):
+            prev_uris = prev.get("gcs_uris") or []
+            if prev_uris and len(prev_uris) == len(current_video_files):
+                prev_names = sorted(
+                    u.rsplit("/", 1)[-1].split("_", 1)[-1] for u in prev_uris
+                )
+                if prev_names == current_file_names:
+                    reused_uris = prev_uris
+                    reused_voiceover = prev.get("voiceover_gcs_uri")
+                    logger.info("Reusing GCS URIs from previous item (%d files, vo=%s)",
+                                len(reused_uris), bool(reused_voiceover))
+                    await update_progress(status_msg, 1,
+                        f"♻️ Файлы уже в облаке — пропускаю загрузку ({len(reused_uris)} файлов).")
+                    break
+    except Exception as e:
+        logger.warning("GCS reuse check failed, will copy: %s", e)
 
-        try:
-            await update_progress(status_msg, 1, f"Файл {idx}/{len(all_files)}: {file_name}\n(Видео скачиваются 10-15 сек/файл)...")
-            gcs_uri = await asyncio.to_thread(drive_service.copy_to_gcs, file_id, gcs_bucket, gcs_path)
-            gcs_uris.append(gcs_uri)
-        except Exception as e:
-            logger.error("File copy error for %s: %s", file_name, e)
-            failed_files.append(file_name)
-            continue
+    # Check if current Drive has audio that needs a voiceover URI
+    has_audio_in_drive = bool(sb_audio) if is_storyboard else bool(len(all_files) > len(current_video_files))
+    if reused_uris and has_audio_in_drive and not reused_voiceover:
+        logger.warning("GCS reuse skipped: Drive has audio but previous item has no voiceover_gcs_uri")
+        reused_uris = None
 
-        # Delete is best-effort — don't let it kill the pipeline
-        try:
-            await asyncio.to_thread(drive_service.delete_file, file_id)
-        except Exception as e:
-            logger.warning("File delete warning for %s (non-fatal): %s", file_name, e)
-            
-    if not gcs_uris:
-        await update_progress(status_msg, 1, f"❌ Не удалось перенести ни одного файла. Ошибок: {len(failed_files)}")
-        await supabase_service.update_item(item_id, status="awaiting_footage")
-        return
-        
-    error_summary = f"\n⚠️ Ошибок доступа (фото/файлы): {len(failed_files)}" if failed_files else ""
-    await update_progress(status_msg, 2, f"Успешно скопировано: {len(gcs_uris)}{error_summary}")
-        
+    if reused_uris:
+        gcs_uris = list(reused_uris)
+        if reused_voiceover:
+            gcs_uris.append(reused_voiceover)
+    else:
+        gcs_bucket = settings.GCS_BUCKET_NAME
+        gcs_uris = []
+        failed_files = []
+        loop = asyncio.get_event_loop()
+
+        for idx, file_meta in enumerate(all_files, 1):
+            file_id = file_meta['id']
+            file_name = file_meta['name']
+            gcs_path = f"footage/{item_id}/{uuid.uuid4().hex[:8]}_{file_name}"
+
+            # ── Per-chunk progress → Telegram (throttled to ~20% steps) ──
+            last_reported = [0.0]
+
+            def on_progress(phase: str, pct: float,
+                            _idx=idx, _name=file_name, _total=len(all_files)):
+                if phase == "download":
+                    if pct - last_reported[0] < 0.20 and pct < 1.0:
+                        return
+                    last_reported[0] = pct
+                    text = f"Файл {_idx}/{_total}: {_name}\n📥 Скачивание: {int(pct * 100)}%"
+                else:
+                    text = f"Файл {_idx}/{_total}: {_name}\n📤 Загрузка в облако..."
+                try:
+                    asyncio.run_coroutine_threadsafe(
+                        update_progress(status_msg, 1, text), loop
+                    )
+                except Exception:
+                    pass  # Telegram edit failure must not kill the copy
+
+            try:
+                await update_progress(status_msg, 1, f"Файл {idx}/{len(all_files)}: {file_name}\n📥 Скачивание: 0%")
+                gcs_uri = await asyncio.to_thread(
+                    drive_service.copy_to_gcs, file_id, gcs_bucket, gcs_path,
+                    progress_callback=on_progress,
+                )
+                gcs_uris.append(gcs_uri)
+            except Exception as e:
+                logger.error("File copy error for %s: %s", file_name, e)
+                failed_files.append(file_name)
+                continue
+
+            # Delete is best-effort — don't let it kill the pipeline
+            try:
+                await asyncio.to_thread(drive_service.delete_file, file_id)
+            except Exception as e:
+                logger.warning("File delete warning for %s (non-fatal): %s", file_name, e)
+
+        if not gcs_uris:
+            await update_progress(status_msg, 1, f"❌ Не удалось перенести ни одного файла. Ошибок: {len(failed_files)}")
+            await supabase_service.update_item(item_id, status="awaiting_footage")
+            return
+
+        error_summary = f"\n⚠️ Ошибок доступа (фото/файлы): {len(failed_files)}" if failed_files else ""
+        await update_progress(status_msg, 2, f"Успешно скопировано: {len(gcs_uris)}{error_summary}")
+
     # Split URIs based on mode
     if is_storyboard:
         # Audio was added last in all_files, so last GCS URI is voiceover
@@ -687,6 +857,7 @@ async def analyze_and_propose(chat_id: int, item_id: str, gcs_uris: list[str], s
     item = await supabase_service.get_item(item_id)
     scenario_text = item.get("script", "") if item else ""
     voiceover_gcs_uri = item.get("voiceover_gcs_uri") if item else None
+    analysis_mode = item.get("analysis_mode") if item else None
     
     prompt = (
         f"Тебе передано {len(gcs_uris)} видео. "
@@ -791,8 +962,40 @@ async def analyze_and_propose(chat_id: int, item_id: str, gcs_uris: list[str], s
         voiceover_data = None
         whisper_words = {}
 
+    # Refine smart storyboard sub-mode based on voiceover ratio
+    if analysis_mode == "smart" and voiceover_data:
+        vo_dur = voiceover_data.get("voiceover_duration", 0.0)
+        vo_segs = len(voiceover_data.get("segments", []))
+        if vo_dur <= 15.0 and vo_segs <= 3:
+            analysis_mode = "smart_montage"
+        else:
+            analysis_mode = "smart_narrative"
+        logger.info("Smart storyboard sub-mode: %s (vo=%.1fs, %d segments)", analysis_mode, vo_dur, vo_segs)
+
     gemini = GeminiService()
-    analysis = await gemini.analyze_video(video_uris, prompt, audio_map=audio_map, voiceover_data=voiceover_data)
+
+    # ── Pass 1: Story discovery (smart_montage only) ──
+    story_context = None
+    if analysis_mode == "smart_montage":
+        vo_text = None
+        if voiceover_data and voiceover_data.get("segments"):
+            vo_text = " ".join(s["text"] for s in voiceover_data["segments"])
+
+        # Build video name mapping for Gemini
+        video_names = []
+        for idx, uri in enumerate(video_uris):
+            name = uri.rsplit("/", 1)[-1].split("_", 1)[-1] if "/" in uri else f"video_{idx}"
+            video_names.append(f"Видео {idx + 1} = {name}")
+
+        story_context = await gemini.discover_story(
+            video_uris, voiceover_text=vo_text, video_names=video_names,
+        )
+        if story_context:
+            await update_progress(status_msg, 3, "Нашёл историю в видео! Подбираю лучшие кадры...")
+
+    # Pro for precise clip selection when story context exists (montage mode)
+    gemini_model = "gemini-2.5-pro" if story_context else "gemini-2.5-flash"
+    analysis = await gemini.analyze_video(video_uris, prompt, model=gemini_model, audio_map=audio_map, voiceover_data=voiceover_data, analysis_mode=analysis_mode, story_context=story_context)
     
     if not analysis:
         # Fallback Mode
@@ -824,6 +1027,8 @@ async def analyze_and_propose(chat_id: int, item_id: str, gcs_uris: list[str], s
         if voiceover_data and voiceover_data.get("segments"):
             result_data["voiceover_segments"] = voiceover_data["segments"]
             result_data["voiceover_duration"] = voiceover_data["voiceover_duration"]
+        if story_context:
+            result_data["story_context"] = story_context
         await supabase_service.update_item(
             item_id,
             status="ready_for_render",
@@ -874,6 +1079,10 @@ class ScriptEdit(StatesGroup):
 class RedoFeedback(StatesGroup):
     waiting_for_text = State()
 
+class AddClipState(StatesGroup):
+    waiting_for_description = State()
+    waiting_for_manual = State()  # Fallback: user specifies video number + time
+
 
 def _parse_style_params(text: str) -> tuple[str, dict]:
     """Extract sticker style/quantity params from end of scenario_text.
@@ -883,6 +1092,8 @@ def _parse_style_params(text: str) -> tuple[str, dict]:
     """
     import re
     params = {}
+    if not text:
+        return "", params
     clean = text
 
     m = re.search(r'sticker\s+style:?\s*(\w+)', clean, re.IGNORECASE)
@@ -1282,6 +1493,7 @@ async def _candidates_to_clips(candidates, gcs_uris: list[str], gcs_service: GCS
     """Convert ClipCandidate list to Creatomate Clip list with signed URLs."""
     clips = []
     _signed_cache: dict[str, str] = {}
+    _duration_cache: dict[str, float] = {}
 
     for c in candidates:
         if isinstance(c, dict):
@@ -1302,6 +1514,26 @@ async def _candidates_to_clips(candidates, gcs_uris: list[str], gcs_service: GCS
                 gcs_service.generate_presigned_url, gcs_uri
             )
         signed_url = _signed_cache[gcs_uri]
+
+        # Clamp trim to source video duration (prevent black frames)
+        if gcs_uri not in _duration_cache:
+            try:
+                _duration_cache[gcs_uri] = await _get_duration_ffprobe(signed_url)
+            except Exception:
+                _duration_cache[gcs_uri] = 0
+        src_dur = _duration_cache[gcs_uri]
+        if src_dur > 0:
+            # Account for 0.5s prebuffer that build_source will add
+            safe_dur = src_dur - 0.5
+            if start >= safe_dur:
+                logger.warning("Clip v%d: trim_start %.1f >= safe_dur %.1f — clamping to %.1f",
+                               v_idx + 1, start, safe_dur, max(0, safe_dur - 3))
+                start = max(0, safe_dur - 3)
+            if end > safe_dur:
+                old_end = end
+                end = safe_dur
+                logger.warning("Clip v%d: trim_end %.1f > safe_dur %.1f (source=%.1f) — clamped to %.1f",
+                               v_idx + 1, old_end, safe_dur, src_dur, end)
         clip_type = c.get("clip_type", "speech") if isinstance(c, dict) else getattr(c, "clip_type", "speech")
         matched_seg = c.get("matched_voiceover_segment") if isinstance(c, dict) else getattr(c, "matched_voiceover_segment", None)
         clips.append(Clip(
@@ -1331,6 +1563,7 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
     clip_descriptions = None
     whisper_words = None
     voiceover_words = None
+    analysis_data = None
     raw_analysis = item.get("analysis_result") or item.get("analysis_json")
     if raw_analysis:
         analysis_data = json.loads(raw_analysis) if isinstance(raw_analysis, str) else raw_analysis
@@ -1387,23 +1620,93 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
     quality_label = "🧪 Dev (720p)" if quality == "dev" else "🚀 Prod (1080p)"
     logger.debug("[Render] video_format=%r, music_mood=%r, clips=%d, quality=%s", video_format, music_mood, len(clips), quality)
 
-    # ── Smart storyboard: force all clips to broll (mute video, voiceover replaces) ──
+    # ── Mode routing ──
     content_mode = item.get("content_mode", "talking_head")
+    voiceover_segments = None
+    signed_voiceover_url = None
+    smart_storyboard_voiceover_url = None  # single-track voiceover for smart storyboard
+    smart_storyboard_vo_duration = 0.0
+    th_voiceover_gcs_uri = item.get("voiceover_gcs_uri")
+
     if content_mode == "storyboard":
+        # ── Smart storyboard ──
         for clip in clips:
             clip.clip_type = "broll"
         logger.info("Smart storyboard: forced %d clips to broll", len(clips))
 
-    # ── Hybrid mode: per-clip voiceover for talking_head + smart storyboard ──
-    voiceover_segments = None
-    signed_voiceover_url = None
-    th_voiceover_gcs_uri = item.get("voiceover_gcs_uri")
-    if th_voiceover_gcs_uri and content_mode in ("talking_head", "storyboard"):
-        # Extract voiceover segments from analysis data (saved by analyze_and_propose)
+        # Detect montage vs narrative by voiceover ratio
+        vo_seg_count = len(analysis_data.get("voiceover_segments", [])) if analysis_data else 0
+        vo_dur = analysis_data.get("voiceover_duration", 0.0) if analysis_data else 0.0
+        is_montage = (vo_dur <= 15.0 and vo_seg_count <= 3)
+        logger.info("Smart storyboard mode: %s (vo=%.1fs, %d segments)",
+                    "MONTAGE" if is_montage else "NARRATIVE", vo_dur, vo_seg_count)
+
+        if th_voiceover_gcs_uri and is_montage:
+            # MONTAGE: single voiceover track over visual montage
+            gcs_service = GCSService()
+            try:
+                smart_storyboard_voiceover_url = await asyncio.to_thread(
+                    gcs_service.generate_presigned_url, th_voiceover_gcs_uri
+                )
+            except Exception as e:
+                logger.error("Failed to sign voiceover URL: %s", e)
+
+            if analysis_data:
+                smart_storyboard_vo_duration = analysis_data.get("voiceover_duration", 0.0)
+            logger.info("Smart storyboard MONTAGE: single voiceover track (%.1fs), %d clips",
+                        smart_storyboard_vo_duration, len(clips))
+
+        elif th_voiceover_gcs_uri and not is_montage:
+            # NARRATIVE: voiceover leads, per-clip matching (reuse hybrid logic)
+            voiceover_segments = analysis_data.get("voiceover_segments") if analysis_data else None
+            if voiceover_segments:
+                gcs_service = GCSService()
+                try:
+                    signed_voiceover_url = await asyncio.to_thread(
+                        gcs_service.generate_presigned_url, th_voiceover_gcs_uri
+                    )
+                except Exception as e:
+                    logger.error("Failed to sign voiceover URL: %s", e)
+
+                # Same dedup + filter + reorder as hybrid
+                used_segments: set[int] = set()
+                for ci, clip in enumerate(clips):
+                    if clip.matched_voiceover_segment is not None:
+                        if clip.matched_voiceover_segment in used_segments:
+                            clip.matched_voiceover_segment = None
+                        else:
+                            used_segments.add(clip.matched_voiceover_segment)
+
+                # Drop unmatched broll — voiceover drives narrative
+                unmatched = [c for c in clips if c.clip_type == "broll" and c.matched_voiceover_segment is None]
+                if unmatched:
+                    before = len(clips)
+                    clips = [c for c in clips if not (c.clip_type == "broll" and c.matched_voiceover_segment is None)]
+                    logger.info("[Narrative] Dropped %d unmatched broll clips", before - len(clips))
+
+                # Extend clips to fit segments
+                for clip in clips:
+                    if (clip.clip_type == "broll"
+                            and clip.matched_voiceover_segment is not None
+                            and 0 <= clip.matched_voiceover_segment < len(voiceover_segments)):
+                        seg = voiceover_segments[clip.matched_voiceover_segment]
+                        seg_dur = seg["end"] - seg["start"]
+                        if seg_dur > clip.trim_duration:
+                            clip.trim_duration = seg_dur
+
+                # Reorder by segment
+                clips = sorted(
+                    [c for c in clips if c.matched_voiceover_segment is not None],
+                    key=lambda c: c.matched_voiceover_segment,
+                )
+                logger.info("Smart storyboard NARRATIVE: %d clips matched to %d segments",
+                            len(clips), len(voiceover_segments))
+
+    elif th_voiceover_gcs_uri and content_mode == "talking_head":
+        # ── Hybrid mode: per-clip voiceover matching ──
         voiceover_segments = analysis_data.get("voiceover_segments") if analysis_data else None
 
         if voiceover_segments:
-            # Sign raw voiceover URL for Creatomate per-clip trim
             gcs_service = GCSService()
             try:
                 signed_voiceover_url = await asyncio.to_thread(
@@ -1423,12 +1726,12 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
                     else:
                         used_segments.add(clip.matched_voiceover_segment)
 
-            # Drop unmatched broll — voiceover drives montage, unmatched broll has no audio
-            before_count = len(clips)
-            clips = [c for c in clips if not (c.clip_type == "broll" and c.matched_voiceover_segment is None)]
-            dropped = before_count - len(clips)
-            if dropped:
-                logger.info("[Filter] Dropped %d unmatched broll clips (voiceover drives montage)", dropped)
+            # Hybrid: drop unmatched broll — voiceover drives montage
+            unmatched_broll = [c for c in clips if c.clip_type == "broll" and c.matched_voiceover_segment is None]
+            if unmatched_broll:
+                before_count = len(clips)
+                clips = [c for c in clips if not (c.clip_type == "broll" and c.matched_voiceover_segment is None)]
+                logger.info("[Filter] Dropped %d unmatched broll clips (voiceover drives montage)", before_count - len(clips))
 
             # Extend broll clips to fit voiceover segments (prevents mid-sentence cuts)
             for clip in clips:
@@ -1451,16 +1754,10 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
             clips = broll_clips + speech_clips
             logger.info("[Reorder] %d broll (voiceover) + %d speech → broll first", len(broll_clips), len(speech_clips))
 
-            # Diagnostic logging
             matched = sum(1 for c in clips if c.matched_voiceover_segment is not None)
             broll_count = sum(1 for c in clips if c.clip_type == "broll")
-            logger.info(
-                "Per-clip voiceover: %d/%d broll clips matched, %d segments available",
-                matched, broll_count, len(voiceover_segments),
-            )
-            for ci, clip in enumerate(clips):
-                if clip.clip_type == "broll":
-                    logger.info("[Mapping] clip %d (broll) → Seg %s", ci, clip.matched_voiceover_segment)
+            logger.info("Per-clip voiceover: %d/%d broll clips matched, %d segments available",
+                        matched, broll_count, len(voiceover_segments))
         else:
             logger.info("Hybrid mode: no voiceover_segments in analysis — rendering without per-clip audio")
 
@@ -1498,8 +1795,14 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
                 logger.info("Speech trim end: video %d, duration %.1f → %.1f (last word at %.1fs)", clip.video_index, old_dur, clip.trim_duration, last_word_end)
 
     # ── Visual Director + anchor-based stickers (AFTER speech trim) ──
-    model_name = "claude-opus-4-6" if quality == "prod" else "claude-sonnet-4-6"
-    logger.info("Visual Director model: %s (quality=%s)", model_name, quality)
+    # Storyboard: Sonnet (just transitions + font, no stickers). TH/hybrid: Opus (sticker placement matters)
+    if content_mode == "storyboard":
+        model_name = "claude-sonnet-4-6"
+    elif quality == "prod":
+        model_name = "claude-opus-4-6"
+    else:
+        model_name = "claude-sonnet-4-6"
+    logger.info("Visual Director model: %s (content_mode=%s, quality=%s)", model_name, content_mode, quality)
 
     # Rebuild clips_info with post-trim durations
     clips_info = [
@@ -1507,6 +1810,10 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
         for i, clip in enumerate(clips)
     ]
     sticker_count = style_params.get("sticker_count", 2) if style_params else 2
+    avg_clip_dur = sum(c.trim_duration for c in clips) / len(clips) if clips else 0
+    if avg_clip_dur < 3.0:
+        sticker_count = 0  # Fast montage: clips too short for stickers
+        logger.info("Stickers disabled: avg clip duration %.1fs < 3s", avg_clip_dur)
     total_dur = sum(c.trim_duration for c in clips)
 
     # Build candidate spans from Whisper words for semantic selection
@@ -1583,6 +1890,12 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
         blueprint["overall_style"],
         blueprint.get("reasoning", "n/a"),
     )
+    # Montage mode: voiceover covers content, no text popups needed
+    if smart_storyboard_voiceover_url and blueprint.get("text_popups"):
+        logger.info("Montage mode: cleared %d text popups (voiceover covers content)",
+                    len(blueprint["text_popups"]))
+        blueprint["text_popups"] = []
+
     logger.debug("Visual blueprint: %s", blueprint)
 
     anchored_overlays = _merge_anchors_into_overlays(blueprint.get("overlays", []), anchors or [])
@@ -1595,27 +1908,82 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
             clip_dur = clips[j].trim_duration if j < len(clips) else 0
             transition_durations.append(0.5 if t and clip_dur >= 2.5 else 0.0)
 
+    # ── Save final clip list for remix reproducibility ──
     try:
-        source = creatomate.build_source(
-            clips=clips,
-            video_format=video_format,
-            music_mood=music_mood,
-            karaoke=True,
-            quality=quality,
-            whisper_words=whisper_words,
-            voiceover_words=voiceover_words,
-            transition_durations=transition_durations,
-            voiceover_segments=voiceover_segments,
-            per_clip_voiceover_url=signed_voiceover_url,
-            font_family=blueprint.get("font_family", "Montserrat"),
-            subtitle_color=blueprint.get("subtitle_color"),
-        )
+        rendered_clips = [
+            {"video_index": c.video_index, "trim_start": c.trim_start,
+             "trim_duration": c.trim_duration, "clip_type": c.clip_type}
+            for c in clips
+        ]
+        if analysis_data is None:
+            analysis_data = {}
+        analysis_data["rendered_clips"] = rendered_clips
+        await supabase_service.update_item(item_id, analysis_result=analysis_data)
+        logger.info("[Remix] Saved %d rendered clips for item %s", len(rendered_clips), item_id[:8])
+    except Exception as e:
+        logger.warning("[Remix] Failed to save rendered clips: %s", e)
+
+    try:
+        if smart_storyboard_voiceover_url:
+            # Smart storyboard: single voiceover track over montage (like ordered storyboard)
+            # Pick a background music loop based on Gemini's mood suggestion
+            from app.services.creatomate_service import _pick_loop
+            loop_uri = _pick_loop(music_mood)
+            loop_signed = None
+            if loop_uri:
+                try:
+                    gcs_svc = GCSService()
+                    loop_signed = await asyncio.to_thread(gcs_svc.generate_presigned_url, loop_uri)
+                    logger.info("Music loop picked: mood=%s, uri=%s", music_mood, loop_uri.rsplit("/", 1)[-1])
+                except Exception as e:
+                    logger.warning("Music loop signing failed: %s", e)
+
+            # Get voiceover segments for spreading across timeline
+            spread_segments = analysis_data.get("voiceover_segments") if analysis_data else None
+
+            source = creatomate.build_source(
+                clips=clips,
+                video_format=video_format,
+                music_mood=music_mood,
+                karaoke=True,
+                quality=quality,
+                voiceover_url=smart_storyboard_voiceover_url,
+                voiceover_duration=smart_storyboard_vo_duration,
+                transition_durations=transition_durations,
+                font_family=blueprint.get("font_family", "Montserrat"),
+                subtitle_color=blueprint.get("subtitle_color"),
+                ambient_volume="15%",
+                music_loop_url=loop_signed,
+                spread_voiceover=spread_segments,
+            )
+
+            # No explicit duration — Creatomate auto-sizes from elements.
+            # This prevents black screen (which happened when cap > actual clip content).
+            total_clip_dur = sum(c.trim_duration for c in clips)
+            logger.info("Smart storyboard: auto-duration (clips=%.1fs, vo=%.1fs)",
+                        total_clip_dur, smart_storyboard_vo_duration)
+        else:
+            source = creatomate.build_source(
+                clips=clips,
+                video_format=video_format,
+                music_mood=music_mood,
+                karaoke=True,
+                quality=quality,
+                whisper_words=whisper_words,
+                voiceover_words=voiceover_words,
+                transition_durations=transition_durations,
+                voiceover_segments=voiceover_segments,
+                per_clip_voiceover_url=signed_voiceover_url,
+                font_family=blueprint.get("font_family", "Montserrat"),
+                subtitle_color=blueprint.get("subtitle_color"),
+            )
 
         source["elements"], _ = apply_visual_blueprint(
             source["elements"], blueprint,
             [c.trim_duration for c in clips],
             anchored_overlays=anchored_overlays if anchored_overlays else None,
             clips=clips if anchored_overlays else None,
+            skip_sfx=bool(smart_storyboard_voiceover_url),
         )
 
         render_id = await creatomate.submit_render(source, webhook_url)
@@ -2126,12 +2494,6 @@ async def process_redo_feedback(message: types.Message, state: FSMContext):
     await state.clear()
 
 
-# Fallback text handler MUST be registered LAST
-@router.message(F.text, ~Command("start", "help", "status", "reels", "post", "carousel", "stories", "ready"))
-async def handle_text(message: types.Message):
-    await _process_idea(message, message.text)
-
-
 # ── Approve / Redo callback handlers ─────────────────────────────────────
 
 @router.callback_query(F.data.startswith("approve:"))
@@ -2158,6 +2520,415 @@ async def on_approve_video(callback: types.CallbackQuery):
         await callback.answer("Видео одобрено!")
     except Exception as e:
         logger.error("[Callback Error] approve: %s", e)
+
+
+@router.callback_query(F.data.startswith("remix:"))
+async def on_remix_render(callback: types.CallbackQuery):
+    """Re-render with same clips but fresh Visual Director + new music loop."""
+    try:
+        _, item_id = callback.data.split(":", 1)
+        logger.info("[Remix] Received remix action for item %s", item_id)
+
+        # Remove keyboard to prevent double-tap
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+        item = await supabase_service.get_item(item_id)
+        if not item:
+            await callback.answer("Запись не найдена", show_alert=True)
+            return
+
+        raw = item.get("analysis_result") or item.get("analysis_json")
+        if not raw:
+            await callback.answer("Нет данных анализа для перемонтажа.", show_alert=True)
+            return
+
+        analysis = json.loads(raw) if isinstance(raw, str) else raw
+        gcs_uris = item.get("gcs_uris") or []
+
+        if not gcs_uris:
+            await callback.answer("Нет видео для перемонтажа.", show_alert=True)
+            return
+
+        gcs_service = GCSService()
+        rendered_clips = analysis.get("rendered_clips")
+
+        if rendered_clips:
+            # Restore exact clips from saved render (remix fidelity)
+            clips = []
+            for rc in rendered_clips:
+                vi = rc.get("video_index", 0)
+                if vi >= len(gcs_uris):
+                    logger.warning("[Remix] video_index %d out of range (%d uris), skipping", vi, len(gcs_uris))
+                    continue
+                signed_url = await asyncio.to_thread(gcs_service.generate_presigned_url, gcs_uris[vi])
+                clips.append(Clip(
+                    source=signed_url,
+                    trim_start=rc.get("trim_start", 0.0),
+                    trim_duration=rc.get("trim_duration", 5.0),
+                    clip_type=rc.get("clip_type", "broll"),
+                    video_index=vi,
+                ))
+            logger.info("[Remix] Restored %d clips from saved render", len(clips))
+        else:
+            # Fallback: derive from candidates (old items without rendered_clips)
+            candidates = analysis.get("clip_candidates", [])
+            if not candidates:
+                await callback.answer("Нет клипов для перемонтажа.", show_alert=True)
+                return
+            clips = await _candidates_to_clips(candidates, gcs_uris, gcs_service)
+            logger.info("[Remix] Fallback: derived %d clips from candidates", len(clips))
+
+        if not clips:
+            await callback.answer("Не удалось восстановить клипы.", show_alert=True)
+            return
+
+        # Reset status so render pipeline works
+        await supabase_service.update_item(item_id, status="ready_for_render")
+
+        # Reuse stored costs
+        cost_whisper = item.get("cost_whisper") or 0.0
+        cost_gemini = item.get("cost_gemini") or 0.0
+
+        logger.info("[Remix] Re-rendering %d clips with fresh creative", len(clips))
+        await callback.answer("🔄 Перемонтаж запущен...")
+        await _start_render(callback, item, clips, quality="prod",
+                            cost_whisper=cost_whisper, cost_gemini=cost_gemini)
+
+    except Exception as e:
+        logger.error("[Callback Error] remix: %s", e)
+        try:
+            await callback.answer("Ошибка перемонтажа", show_alert=True)
+        except Exception:
+            pass
+
+
+@router.callback_query(F.data.startswith("addclip:"))
+async def on_add_clip(callback: types.CallbackQuery, state: FSMContext):
+    """User wants to find and add a specific moment to the clip list."""
+    try:
+        _, item_id = callback.data.split(":", 1)
+        logger.info("[AddClip] Received addclip action for item %s", item_id)
+
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+
+        await state.set_state(AddClipState.waiting_for_description)
+        await state.update_data(item_id=item_id)
+        await callback.message.answer(
+            "🎬 Опиши момент, который хочешь добавить.\n"
+            "Например: «момент где дарят цветы» или «крупный план лица»"
+        )
+        await callback.answer()
+    except Exception as e:
+        logger.error("[Callback Error] addclip: %s", e)
+
+
+@router.message(AddClipState.waiting_for_description, F.text)
+async def on_add_clip_description(message: types.Message, state: FSMContext):
+    """User described a moment — Gemini finds it across all videos."""
+    data = await state.get_data()
+    item_id = data.get("item_id")
+
+    if not item_id:
+        await state.clear()
+        await message.answer("Ошибка: не найден ID контента.")
+        return
+
+    description = message.text.strip()
+    status_msg = await message.answer(f"🔍 Ищу момент: «{description}»...")
+
+    try:
+        item = await supabase_service.get_item(item_id)
+        if not item:
+            await state.clear()
+            await status_msg.edit_text("❌ Запись не найдена.")
+            return
+
+        gcs_uris = item.get("gcs_uris") or []
+        if not gcs_uris:
+            await state.clear()
+            await status_msg.edit_text("❌ Нет видео для поиска.")
+            return
+
+        # Call Gemini to find the specific moment
+        from app.services.gemini_service import GeminiService
+        gemini = GeminiService()
+
+        find_prompt = (
+            f"Тебе передано {len(gcs_uris)} видео. "
+            f"Найди ОДИН конкретный момент: «{description}».\n\n"
+            "ПРАВИЛА:\n"
+            "1. Верни РОВНО 1 clip_candidate с точными start_time и end_time (1-3 секунды).\n"
+            "2. Выбери самый яркий и чёткий момент, соответствующий описанию.\n"
+            "3. Если такого момента нет ни в одном видео — верни пустой список clip_candidates.\n"
+        )
+
+        analysis = await gemini.analyze_video(gcs_uris, find_prompt)
+
+        if not analysis or not analysis.clip_candidates:
+            # Fallback: show video descriptions, ask user to specify manually
+            video_list = []
+            for i, uri in enumerate(gcs_uris):
+                fname = uri.rsplit("/", 1)[-1].split("_", 1)[-1] if "/" in uri else f"Video {i+1}"
+                video_list.append(f"{i+1}. {fname}")
+
+            hint = "\n".join(video_list)
+            await status_msg.edit_text(
+                f"😔 Не нашёл «{description}» автоматически.\n\n"
+                f"Твои видео:\n{hint}\n\n"
+                "Напиши номер видео и примерное время, например:\n"
+                "«2 0:05-0:09» или «3 начало»"
+            )
+            await state.set_state(AddClipState.waiting_for_manual)
+            await state.update_data(item_id=item_id, description=description)
+            return
+
+        # Gemini found it — clear FSM state
+        await state.clear()
+
+        # Add the found clip to existing candidates
+        new_candidate = analysis.clip_candidates[0]
+        new_clip_dict = {
+            "video_index": new_candidate.video_index,
+            "start_time": new_candidate.start_time,
+            "end_time": new_candidate.end_time,
+            "clip_type": getattr(new_candidate, "clip_type", "broll"),
+            "visual_description": getattr(new_candidate, "visual_description", description),
+            "reason": f"Добавлено: {description}",
+        }
+
+        raw = item.get("analysis_result") or item.get("analysis_json")
+        existing_analysis = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        candidates = existing_analysis.get("clip_candidates", [])
+        candidates.append(new_clip_dict)
+
+        vi = new_candidate.video_index
+        found_desc = getattr(new_candidate, "visual_description", "")
+        await status_msg.edit_text(
+            f"✅ Нашёл! Видео {vi}: {found_desc}\n\n"
+            "🔄 Пересобираю историю с новым кадром..."
+        )
+
+        # Re-run Pass 2 (Pro) to rebuild story order with the new clip
+        story_context = existing_analysis.get("story_context")
+        if story_context and item.get("content_mode") == "storyboard":
+            reorder_prompt = (
+                f"Тебе передано {len(gcs_uris)} видео и {len(candidates)} клипов-кандидатов.\n"
+                "Пересобери монтаж с ПРАВИЛЬНЫМ порядком для истории.\n\n"
+                f"ВАЖНО: клип «{description}» (видео {vi}, {new_candidate.start_time}-{new_candidate.end_time}с) "
+                "ОБЯЗАТЕЛЬНО должен быть включён — пользователь добавил его вручную.\n\n"
+            )
+            voiceover_data = None
+            vo_segs = existing_analysis.get("voiceover_segments")
+            if vo_segs:
+                voiceover_data = {
+                    "voiceover_duration": existing_analysis.get("voiceover_duration", 0),
+                    "segments": vo_segs,
+                }
+            reordered = await gemini.analyze_video(
+                gcs_uris, reorder_prompt, model="gemini-2.5-pro",
+                voiceover_data=voiceover_data,
+                analysis_mode="smart_montage",
+                story_context=story_context,
+            )
+            if reordered and reordered.clip_candidates:
+                candidates = [
+                    {
+                        "video_index": c.video_index,
+                        "start_time": c.start_time,
+                        "end_time": c.end_time,
+                        "clip_type": getattr(c, "clip_type", "broll"),
+                        "visual_description": getattr(c, "visual_description", ""),
+                        "reason": getattr(c, "reason", ""),
+                    }
+                    for c in reordered.clip_candidates
+                ]
+                logger.info("[AddClip] Pro reordered %d clips for story", len(candidates))
+
+        existing_analysis["clip_candidates"] = candidates
+        existing_analysis.pop("rendered_clips", None)
+        await supabase_service.update_item(item_id, analysis_result=existing_analysis)
+
+        await status_msg.edit_text(
+            f"✅ Нашёл: {found_desc}\n"
+            f"🔄 Рендерю с новым кадром ({len(candidates)} клипов)..."
+        )
+
+        # Auto-render: same logic as remix
+        gcs_service_inst = GCSService()
+        clips = await _candidates_to_clips(candidates, gcs_uris, gcs_service_inst)
+        if not clips:
+            await status_msg.edit_text("❌ Не удалось собрать клипы.")
+            return
+
+        await supabase_service.update_item(item_id, status="ready_for_render")
+        item = await supabase_service.get_item(item_id)
+
+        # _start_render expects callback with .message — create minimal wrapper
+        class _MsgAsCallback:
+            def __init__(self, msg):
+                self.message = msg
+            async def answer(self, *a, **kw):
+                pass
+
+        await _start_render(_MsgAsCallback(status_msg), item, clips,
+                            quality="prod",
+                            cost_whisper=item.get("cost_whisper") or 0.0,
+                            cost_gemini=item.get("cost_gemini") or 0.0)
+
+    except Exception as e:
+        logger.error("[AddClip] Error finding clip: %s", e)
+        await state.clear()
+        try:
+            await status_msg.edit_text(f"❌ Ошибка поиска: {e}")
+        except Exception:
+            pass
+
+
+@router.message(AddClipState.waiting_for_manual, F.text)
+async def on_add_clip_manual(message: types.Message, state: FSMContext):
+    """Fallback: user specifies video number + time when Gemini couldn't find the moment."""
+    import re as _re
+    data = await state.get_data()
+    item_id = data.get("item_id")
+    description = data.get("description", "")
+    await state.clear()
+
+    if not item_id:
+        await message.answer("Ошибка: не найден ID контента.")
+        return
+
+    text = message.text.strip()
+
+    # Parse: "2 0:05-0:09" or "2 5-9" or "3 начало" or just "2"
+    m = _re.match(r"(\d+)\s*(?:(\d+):(\d+)\s*-\s*(\d+):?(\d+)?)?", text)
+    if not m:
+        await message.answer("Не понял. Напиши номер видео и время, например: «2 0:05-0:09»")
+        await state.set_state(AddClipState.waiting_for_manual)
+        await state.update_data(item_id=item_id, description=description)
+        return
+
+    video_num = int(m.group(1))
+    if m.group(2) is not None:
+        start_time = int(m.group(2)) * 60 + int(m.group(3)) if m.group(3) else int(m.group(2))
+        end_min = int(m.group(4))
+        end_sec = int(m.group(5)) if m.group(5) else 0
+        end_time = end_min * 60 + end_sec if m.group(5) else end_min
+        if end_time <= start_time:
+            end_time = start_time + 4
+    else:
+        # No time given — take first 4 seconds
+        start_time = 0
+        end_time = 4
+
+    item = await supabase_service.get_item(item_id)
+    if not item:
+        await message.answer("❌ Запись не найдена.")
+        return
+
+    gcs_uris = item.get("gcs_uris") or []
+    if video_num < 1 or video_num > len(gcs_uris):
+        await message.answer(f"Видео {video_num} не существует. Доступно: 1-{len(gcs_uris)}")
+        await state.set_state(AddClipState.waiting_for_manual)
+        await state.update_data(item_id=item_id, description=description)
+        return
+
+    status_msg = await message.answer(f"✅ Добавляю видео {video_num} [{start_time}-{end_time}с]...")
+
+    try:
+        raw = item.get("analysis_result") or item.get("analysis_json")
+        existing_analysis = json.loads(raw) if isinstance(raw, str) else (raw or {})
+        candidates = existing_analysis.get("clip_candidates", [])
+
+        new_clip_dict = {
+            "video_index": video_num,  # 1-based (pipeline expects 1-based)
+            "start_time": float(start_time),
+            "end_time": float(end_time),
+            "clip_type": "broll",
+            "visual_description": description,
+            "reason": f"Добавлено вручную: {description}",
+        }
+        candidates.append(new_clip_dict)
+
+        # Re-run Pass 2 for story ordering
+        story_context = existing_analysis.get("story_context")
+        if story_context and item.get("content_mode") == "storyboard":
+            from app.services.gemini_service import GeminiService
+            gemini = GeminiService()
+            reorder_prompt = (
+                f"Тебе передано {len(gcs_uris)} видео и {len(candidates)} клипов-кандидатов.\n"
+                "Пересобери монтаж с ПРАВИЛЬНЫМ порядком для истории.\n\n"
+                f"ВАЖНО: клип «{description}» (видео {video_num}, {start_time}-{end_time}с) "
+                "ОБЯЗАТЕЛЬНО должен быть включён — пользователь добавил его вручную.\n\n"
+            )
+            vo_segs = existing_analysis.get("voiceover_segments")
+            voiceover_data = None
+            if vo_segs:
+                voiceover_data = {
+                    "voiceover_duration": existing_analysis.get("voiceover_duration", 0),
+                    "segments": vo_segs,
+                }
+            reordered = await gemini.analyze_video(
+                gcs_uris, reorder_prompt, model="gemini-2.5-pro",
+                voiceover_data=voiceover_data,
+                analysis_mode="smart_montage",
+                story_context=story_context,
+            )
+            if reordered and reordered.clip_candidates:
+                candidates = [
+                    {
+                        "video_index": c.video_index,
+                        "start_time": c.start_time,
+                        "end_time": c.end_time,
+                        "clip_type": getattr(c, "clip_type", "broll"),
+                        "visual_description": getattr(c, "visual_description", ""),
+                        "reason": getattr(c, "reason", ""),
+                    }
+                    for c in reordered.clip_candidates
+                ]
+                logger.info("[AddClip Manual] Pro reordered %d clips", len(candidates))
+
+        existing_analysis["clip_candidates"] = candidates
+        existing_analysis.pop("rendered_clips", None)
+        await supabase_service.update_item(item_id, analysis_result=existing_analysis)
+
+        await status_msg.edit_text(
+            f"✅ Добавлено: видео {video_num} [{start_time}-{end_time}с]\n"
+            f"🔄 Рендерю ({len(candidates)} клипов)..."
+        )
+
+        # Auto-render
+        gcs_service_inst = GCSService()
+        clips = await _candidates_to_clips(candidates, gcs_uris, gcs_service_inst)
+        if not clips:
+            await status_msg.edit_text("❌ Не удалось собрать клипы.")
+            return
+
+        await supabase_service.update_item(item_id, status="ready_for_render")
+        item = await supabase_service.get_item(item_id)
+
+        class _MsgAsCallback:
+            def __init__(self, msg):
+                self.message = msg
+            async def answer(self, *a, **kw):
+                pass
+
+        await _start_render(_MsgAsCallback(status_msg), item, clips,
+                            quality="prod",
+                            cost_whisper=item.get("cost_whisper") or 0.0,
+                            cost_gemini=item.get("cost_gemini") or 0.0)
+
+    except Exception as e:
+        logger.error("[AddClip Manual] Error: %s", e)
+        try:
+            await status_msg.edit_text(f"❌ Ошибка: {e}")
+        except Exception:
+            pass
 
 
 @router.callback_query(F.data.startswith("redo:"))
@@ -2237,3 +3008,9 @@ async def on_retry_render(callback: types.CallbackQuery):
         await callback.message.answer(
             "❌ Повторный рендер не удался. Попробуй /ready заново."
         )
+
+
+# ── Fallback text handler — MUST be registered LAST ──────────────────────
+@router.message(F.text, ~Command("start", "help", "status", "reels", "post", "carousel", "stories", "ready", "addclip", "remix"))
+async def handle_text(message: types.Message):
+    await _process_idea(message, message.text)

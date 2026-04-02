@@ -50,3 +50,19 @@ Format: `YYYY-MM-DD | Что случилось | Почему | Правило 
 
 - 2026-03-23 | OpenAI billing limits silently break Creatomate renders | AI sticker generation via gpt-image-1.5 fails. Error only visible via Creatomate render status API, not in our logs.
 - 2026-03-23 | Google Drive JWT token expiry ("invalid_grant") | Caused by system clock drift. Fix: sync Mac clock via System Settings or `sudo sntp -sS time.apple.com`.
+
+## Smart Storyboard / Montage (Apr 2026)
+
+- 2026-04-01 | Black screen at end of render | Music loop (55s) had no `duration` → Creatomate extended composition | → Set `duration: total_duration` on music audio element
+- 2026-04-02 | Black screen from clip overflow | Gemini selected timestamps beyond source video length (e.g. 4.5-9.5s from 4.8s video) | → Clamp in `_candidates_to_clips`: `end = min(end, src_dur - 0.5)` with ffprobe check
+- 2026-04-02 | Prebuffer extends clip beyond source | 0.5s prebuffer + trim_duration > source → black frames at clip end | → Clamp accounts for prebuffer margin (safe_dur = src_dur - 0.5)
+- 2026-04-01 | `_parse_style_params` crash on None | Storyboard has no script → `re.search(None)` | → Guard: `if not text: return "", {}`
+- 2026-04-01 | `_update_cost` NameError | Method was `_extract_cost`, not `_update_cost` | → Fix method name
+- 2026-04-01 | Pass 1 ШАГ 3 poisoned Pass 2 | Pass 1 created rigid clip plan → Pass 2 followed bad clips | → Removed ШАГ 3, Pass 1 only describes + story arc
+- 2026-04-01 | subtitle_color applied to wrong field | Applied to `fill_color` (base text) instead of `transcript_color` (active word) | → Changed to `transcript_color` in all 3 karaoke elements
+- 2026-04-02 | GCS reuse never matched | Compared all_files (7 = videos+voiceover) with gcs_uris (6 = videos only) | → Filter only VIDEO_EXT for comparison, fetch voiceover_gcs_uri separately
+- 2026-04-02 | Catch-all text handler intercepted FSM messages | `handle_text` registered BEFORE AddClipState handlers | → Move catch-all to LAST in file; aiogram priority = registration order
+- 2026-04-02 | video_index 0-based in manual addclip | Pipeline expects 1-based (Gemini convention) | → Use `video_num` directly (1-based)
+- 2026-04-02 | Pass 2 reorder dropped user-added clip | Gemini Pro decided clip wasn't needed | → Add "ОБЯЗАТЕЛЬНО" instruction for user-added clips in reorder prompt
+- 2026-04-02 | Stuck items block `/ready` forever | Items in processing_video/analyzing after bot restart | → Auto-cancel after 10 min timeout
+- 2026-04-02 | FSM state leaked on early return / exception | `state.clear()` missing in error paths of addclip handler | → Add state.clear() to all exit paths

@@ -10,6 +10,7 @@ reading 10 MB chunks at a time.
 Memory footprint ≈ chunk_size (10 MB), not file_size (300-500 MB).
 """
 
+import logging
 import os
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -19,6 +20,8 @@ from google.cloud import storage
 from tenacity import retry, wait_exponential, stop_after_attempt
 
 from app.config import settings
+
+logger = logging.getLogger(__name__)
 
 SCOPES = [
     "https://www.googleapis.com/auth/drive",
@@ -84,6 +87,7 @@ class DriveService:
         drive_file_id: str,
         gcs_bucket: str,
         gcs_path: str,
+        progress_callback=None,
     ) -> str:
         """
         Stream a file from Google Drive directly into a GCS blob
@@ -92,9 +96,14 @@ class DriveService:
 
         Retries on failure up to 3 times using exponential backoff.
         Returns the gs:// URI of the uploaded object.
+
+        progress_callback(phase, pct): called with ("download", 0.0-1.0)
+        and ("upload", 0.0/1.0) so callers can report progress.
         """
         import tempfile
-        
+
+        fname = gcs_path.rsplit("/", 1)[-1]
+
         # Download to a temporary local file — most reliable approach.
         # MediaIoBaseDownload writes directly to disk, no seek/truncate issues.
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mov") as tmp:
@@ -106,6 +115,15 @@ class DriveService:
             done = False
             while not done:
                 status, done = downloader.next_chunk()
+                pct = status.progress() if status else 1.0
+                size_mb = (status.total_size or 0) / (1024 * 1024) if status else 0
+                logger.info("Download %s: %.0f%% of %.0fMB", fname, pct * 100, size_mb)
+                if progress_callback:
+                    progress_callback("download", pct)
+
+        if progress_callback:
+            progress_callback("upload", 0.0)
+        logger.info("Uploading %s to GCS...", fname)
 
         # Upload the intact file to GCS
         try:
@@ -117,6 +135,7 @@ class DriveService:
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
+        logger.info("Upload complete: %s", fname)
         return f"gs://{gcs_bucket}/{gcs_path}"
 
     # ------------------------------------------------------------------

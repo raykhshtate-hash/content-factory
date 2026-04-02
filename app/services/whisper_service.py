@@ -436,7 +436,10 @@ class WhisperService:
 
             # Refine: detect phrase boundaries via hidden micro-pauses
             raw_count = len(segments)
-            segments = refine_voiceover_segments(segments, words)
+            try:
+                segments = refine_voiceover_segments(segments, words)
+            except Exception as e:
+                logger.warning("Voiceover segment refinement failed, using raw: %s", e)
             if len(segments) != raw_count:
                 logger.info("Voiceover segments refined: %d → %d", raw_count, len(segments))
                 for si, s in enumerate(segments):

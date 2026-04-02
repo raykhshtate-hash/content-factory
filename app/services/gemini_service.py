@@ -127,6 +127,7 @@ class GeminiService:
             if meta:
                 prompt_tokens = getattr(meta, "prompt_token_count", 0) or 0
                 output_tokens = getattr(meta, "candidates_token_count", 0) or 0
+                # Gemini 2.5 Flash: $0.15/$0.60 per 1M tokens (Pro is ~10x more)
                 cost_usd = (prompt_tokens * 0.15 + output_tokens * 0.60) / 1_000_000
                 self._last_cost_usd = cost_usd
                 logger.info("Gemini cost: $%.4f (in=%d, out=%d tokens)", cost_usd, prompt_tokens, output_tokens)
@@ -145,6 +146,97 @@ class GeminiService:
         stop=stop_after_attempt(3),
         reraise=True,
     )
+    async def discover_story(
+        self,
+        gcs_uris: list[str] | str,
+        voiceover_text: str | None = None,
+        model: str = "gemini-2.5-flash",
+        video_names: list[str] | None = None,
+    ) -> str | None:
+        """
+        Pass 1: Watch all videos, describe what happens, identify story arc.
+        Returns free-text story analysis. No clip selection — pure understanding.
+        """
+        if not self.client:
+            return None
+
+        if isinstance(gcs_uris, str):
+            gcs_uris = [gcs_uris]
+
+        # Build video label list
+        video_label_block = ""
+        if video_names:
+            video_label_block = "НУМЕРАЦИЯ ВИДЕО (используй ТОЛЬКО эти номера):\n"
+            video_label_block += "\n".join(video_names) + "\n\n"
+
+        prompt = (
+            f"Тебе передано {len(gcs_uris)} видео В УКАЗАННОМ ПОРЯДКЕ.\n\n"
+            f"{video_label_block}"
+            "ЗАДАЧА: Опиши каждое видео и найди историю.\n\n"
+            "ШАГ 1 — Для КАЖДОГО видео (строго по номерам выше):\n"
+            "- Номер видео и название файла\n"
+            "- Что происходит с таймкодами (ММ:СС)\n"
+            "- Моменты взаимодействия между людьми\n"
+            "- Самые визуально красивые кадры\n\n"
+            "ШАГ 2 — Найди ИСТОРИЮ через все видео:\n"
+            "- ЗАВЯЗКА: Что привлекает внимание?\n"
+            "- РАЗВИТИЕ: Что происходит дальше?\n"
+            "- КУЛЬМИНАЦИЯ: Эмоциональный пик (момент между людьми, реакция). "
+            "Это САМЫЙ ВАЖНЫЙ момент!\n"
+            "- РЕЗУЛЬТАТ: Красивый финал\n\n"
+            "ШАГ 3 — Итог:\n"
+            "Кратко: какая история, какой эмоциональный пик, какое настроение.\n"
+            "НЕ создавай план клипов — это сделает следующий этап.\n"
+        )
+
+        if voiceover_text:
+            prompt += (
+                f"\nОЗВУЧКА (играет поверх видео): «{voiceover_text}»\n"
+                "Учти тему озвучки при описании.\n"
+            )
+
+        try:
+            logger.info("[Gemini] Pass 1: Discovering story in %d videos...", len(gcs_uris))
+            import asyncio
+
+            contents = []
+            for uri in gcs_uris:
+                contents.append(
+                    types.Part.from_uri(file_uri=uri, mime_type="video/mp4")
+                )
+            contents.append(prompt)
+
+            response = await asyncio.to_thread(
+                self.client.models.generate_content,
+                model=model,
+                contents=contents,
+                config=types.GenerateContentConfig(temperature=0),
+            )
+
+            if not response or not response.text:
+                logger.warning("[Gemini] Pass 1: Empty response")
+                return None
+
+            self._extract_cost(response)
+            story = response.text.strip()
+            logger.info("[Gemini] Pass 1: Story discovered (%d chars)", len(story))
+            logger.debug("[Gemini] Story: %s", story[:500])
+            return story
+
+        except Exception as e:
+            logger.error("[Gemini] Pass 1 error: %s", e)
+            return None
+
+    @retry(
+        retry=retry_if_exception(
+            lambda e: isinstance(e, (ServerError, GeminiSafetyError))
+            or (isinstance(e, ClientError) and getattr(e, "code", 0) == 429)
+            or (isinstance(e, ClientError) and "SAFETY" in str(e).upper())
+        ),
+        wait=wait_exponential(multiplier=3, min=10, max=60),
+        stop=stop_after_attempt(3),
+        reraise=True,
+    )
     async def analyze_video(
         self,
         gcs_uris: list[str] | str,
@@ -152,6 +244,8 @@ class GeminiService:
         model: str = "gemini-2.5-flash",
         audio_map: list[dict] | None = None,
         voiceover_data: dict | None = None,
+        analysis_mode: str | None = None,
+        story_context: str | None = None,
     ) -> Optional[VideoAnalysis]:
         """
         Analyze one or multiple videos directly from GCS via gs:// URIs.
@@ -199,15 +293,84 @@ class GeminiService:
                 "СЕГМЕНТЫ ОЗВУЧКИ (пронумерованные):\n"
                 f"{segments_formatted}\n\n"
                 "ПРАВИЛА:\n"
-                "1. КОЛИЧЕСТВО BROLL = КОЛИЧЕСТВО СЕГМЕНТОВ: Создай РОВНО столько broll клипов, "
-                "сколько сегментов озвучки. Каждый broll ОБЯЗАН быть привязан к сегменту. "
-                "Лишних broll без матча быть НЕ ДОЛЖНО.\n"
-                "2. MATCHING: Для каждого broll клипа найди подходящий сегмент озвучки по СМЫСЛУ. "
-                "Если broll показывает пельмени, а сегмент 0 говорит про пельмени — "
-                "укажи matched_voiceover_segment: 0 и match_reason.\n"
-                "3. ОДИН СЕГМЕНТ = ОДИН BROLL: Не назначай один сегмент на несколько broll клипов.\n"
-                "4. ПОРЯДОК КЛИПОВ: На твоё усмотрение. Python автоматически привяжет аудио к каждому broll.\n"
             )
+            if analysis_mode in ("smart", "smart_montage"):
+                # Smart storyboard: voiceover plays over everything, clips are visual montage
+                max_reel = min(20.0, max(10.0, vo_duration * 2))
+                prompt += (
+                    f"1. ОЗВУЧКА: {vo_duration:.0f}с — играет поверх ВСЕХ клипов. "
+                    "НЕ привязывай сегменты к клипам.\n"
+                    f"   Максимум рилса ≈ {max_reel:.0f}с. "
+                    "Историю определяет видео, не озвучка.\n\n"
+                )
+
+                if story_context:
+                    # Pass 2: story already discovered — just select clips
+                    prompt += (
+                        "2. ИСТОРИЯ УЖЕ НАЙДЕНА (анализ ниже).\n\n"
+                        f"=== АНАЛИЗ ВИДЕО ===\n{story_context}\n"
+                        "=== КОНЕЦ АНАЛИЗА ===\n\n"
+                        "ТВОЯ ЗАДАЧА: выбрать точные клипы, следуя этой истории.\n\n"
+                        "3. ПОРЯДОК = ИСТОРИЯ:\n"
+                        "   — Расположи клипы СТРОГО в порядке сюжета: "
+                        "завязка → развитие → кульминация → результат.\n"
+                        "   — НЕ располагай клипы по номерам видео! "
+                        "Если кульминация в Видео 4, а подготовка в Видео 5 — "
+                        "кульминация идёт ПЕРЕД подготовкой, если так по сюжету.\n\n"
+                        "4. ВЫБОР МОМЕНТОВ:\n"
+                        "   — Для каждого этапа найди ЛУЧШИЙ момент по всей длине видео.\n"
+                        "   — Если в анализе написано, что в видео есть интересный "
+                        "момент на определённом таймкоде — бери ИМЕННО его, "
+                        "а не начало видео.\n"
+                        "   — НЕ включай клип, если единственное что в нём — "
+                        "ноги, спины, тротуар, пустой коридор. "
+                        "Перечитай анализ: если красивых кадров в видео нет — "
+                        "ПРОПУСТИ это видео.\n\n"
+                        "5. ЧЕЛОВЕЧЕСКИЕ МОМЕНТЫ — ядро истории. "
+                        "НЕ пропускай взаимодействие между людьми.\n\n"
+                        "6. video_index ТОЧНО = номерам видео из анализа.\n\n"
+                    )
+                else:
+                    # No story context (fallback) — single-pass mode
+                    prompt += (
+                        "2. ПРОСМОТРИ ВСЕ ВИДЕО ЦЕЛИКОМ.\n\n"
+                        "3. ПОПРОБУЙ СОБРАТЬ ИСТОРИЮ из видео. "
+                        "Для каждого этапа найди конкретный момент и вырежи его.\n"
+                        "   — НЕ пропускай человеческие моменты.\n"
+                        "   — Заканчивай красивым финальным кадром.\n"
+                        "   — Если истории нет — креативный монтаж.\n\n"
+                    )
+
+                prompt += (
+                    "4. КАЧЕСТВО: Никаких скучных кадров.\n\n"
+                    "5. matched_voiceover_segment: null для ВСЕХ клипов.\n"
+                )
+            elif analysis_mode == "smart_narrative":
+                # Smart storyboard NARRATIVE: voiceover drives clip selection and order
+                prompt += (
+                    "1. КОЛИЧЕСТВО BROLL = КОЛИЧЕСТВО СЕГМЕНТОВ: Создай РОВНО столько broll клипов, "
+                    "сколько сегментов озвучки. Каждый broll ОБЯЗАН быть привязан к сегменту. "
+                    "Лишних broll без матча быть НЕ ДОЛЖНО.\n"
+                    "2. MATCHING: Для каждого broll клипа найди подходящий сегмент озвучки по СМЫСЛУ. "
+                    "Вырезай конкретный момент из видео, визуально иллюстрирующий фразу сегмента. "
+                    "Укажи matched_voiceover_segment и match_reason.\n"
+                    "3. ОДИН СЕГМЕНТ = ОДИН BROLL: Не назначай один сегмент на несколько broll клипов.\n"
+                    "4. КАЧЕСТВО КАДРА: Каждый клип должен быть осмысленным — "
+                    "показывать объект, действие или эмоцию. Избегай скучных кадров.\n"
+                    "5. ПОРЯДОК: Следуй порядку сегментов озвучки.\n"
+                )
+            else:
+                # Hybrid (talking_head + voiceover): strict 1:1 matching
+                prompt += (
+                    "1. КОЛИЧЕСТВО BROLL = КОЛИЧЕСТВО СЕГМЕНТОВ: Создай РОВНО столько broll клипов, "
+                    "сколько сегментов озвучки. Каждый broll ОБЯЗАН быть привязан к сегменту. "
+                    "Лишних broll без матча быть НЕ ДОЛЖНО.\n"
+                    "2. MATCHING: Для каждого broll клипа найди подходящий сегмент озвучки по СМЫСЛУ. "
+                    "Если broll показывает пельмени, а сегмент 0 говорит про пельмени — "
+                    "укажи matched_voiceover_segment: 0 и match_reason.\n"
+                    "3. ОДИН СЕГМЕНТ = ОДИН BROLL: Не назначай один сегмент на несколько broll клипов.\n"
+                    "4. ПОРЯДОК КЛИПОВ: На твоё усмотрение. Python автоматически привяжет аудио к каждому broll.\n"
+                )
 
         try:
             logger.info("[Gemini] Analyzing %d videos...", len(gcs_uris))
