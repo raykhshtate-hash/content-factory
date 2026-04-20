@@ -20,16 +20,26 @@ LINE_HEIGHT_TITLE = 1.12
 LINE_HEIGHT_BODY = 1.30
 
 # ── Plashka (semi-transparent overlay) ──
-PLASHKA_BG_COLOR = (0, 0, 0)     # RGB — alpha added via PLASHKA_OPACITY
-PLASHKA_OPACITY = 190            # 0-255; ~75% opacity
+# Dark variant: used when photo bottom region is bright (luma > threshold)
+PLASHKA_BG_DARK = (15, 23, 42)       # #0F172A dark navy
+PLASHKA_TEXT_DARK = (255, 255, 255)  # white text on dark
+
+# Light variant: used when photo bottom region is dark (luma <= threshold)
+PLASHKA_BG_LIGHT = (255, 255, 255)   # white
+PLASHKA_TEXT_LIGHT = (15, 23, 42)    # dark navy text on white
+
+# Luminance threshold (0-255): above → bright photo → dark plashka
+PLASHKA_LUMA_THRESHOLD = 140
+
+PLASHKA_OPACITY = 210            # 0-255; ~82% opacity
 PLASHKA_RADIUS = 24              # border_radius (px)
 PLASHKA_PADDING_X = 56
 PLASHKA_PADDING_Y = 40
 PLASHKA_MARGIN_X = 72            # gap between plashka edge and canvas edge
 PLASHKA_MARGIN_BOTTOM = 96       # gap between plashka bottom and canvas bottom
 
-# ── Text ──
-TEXT_COLOR = (255, 255, 255)
+# Legacy alias — kept for any test that imports TEXT_COLOR directly
+TEXT_COLOR = PLASHKA_TEXT_DARK
 
 # ── Output ──
 PHOTO_JPEG_QUALITY = 92

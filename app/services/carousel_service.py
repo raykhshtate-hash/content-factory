@@ -29,14 +29,17 @@ from assets.carousel_tokens import (
     LINE_HEIGHT_BODY,
     LINE_HEIGHT_TITLE,
     PHOTO_JPEG_QUALITY,
-    PLASHKA_BG_COLOR,
+    PLASHKA_BG_DARK,
+    PLASHKA_BG_LIGHT,
+    PLASHKA_LUMA_THRESHOLD,
     PLASHKA_MARGIN_BOTTOM,
     PLASHKA_MARGIN_X,
     PLASHKA_OPACITY,
     PLASHKA_PADDING_X,
     PLASHKA_PADDING_Y,
     PLASHKA_RADIUS,
-    TEXT_COLOR,
+    PLASHKA_TEXT_DARK,
+    PLASHKA_TEXT_LIGHT,
 )
 
 logger = logging.getLogger(__name__)
@@ -112,11 +115,26 @@ def _wrap_text(
     return lines
 
 
-def _build_slide_overlay(title: str, body: str | None) -> Image.Image:
+def _sample_luma(image: Image.Image, y_start: int) -> float:
+    """Return average luminance (0-255) of the bottom region of `image`.
+
+    Samples the strip from y_start to canvas bottom, converted to grayscale.
+    Used to choose dark vs light plashka automatically.
+    """
+    region = image.crop((0, y_start, CANVAS_W, CANVAS_H)).convert("L")
+    pixels = list(region.getdata())
+    return sum(pixels) / len(pixels) if pixels else 128.0
+
+
+def _build_slide_overlay(title: str, body: str | None, bright_bg: bool) -> Image.Image:
     """Return RGBA 1080x1350 overlay: transparent bg + plashka + centered text.
 
     Caller composes onto base image via Image.alpha_composite.
+    bright_bg=True → dark plashka; bright_bg=False → light plashka.
     """
+    plashka_bg = PLASHKA_BG_DARK if bright_bg else PLASHKA_BG_LIGHT
+    text_color = PLASHKA_TEXT_DARK if bright_bg else PLASHKA_TEXT_LIGHT
+
     overlay = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
 
@@ -151,11 +169,10 @@ def _build_slide_overlay(title: str, body: str | None) -> Image.Image:
     plashka_y0 = plashka_y1 - plashka_h
 
     # Semi-transparent rounded plashka
-    plashka_fill = (*PLASHKA_BG_COLOR, PLASHKA_OPACITY)
     draw.rounded_rectangle(
         [plashka_x0, plashka_y0, plashka_x0 + plashka_w, plashka_y1],
         radius=PLASHKA_RADIUS,
-        fill=plashka_fill,
+        fill=(*plashka_bg, PLASHKA_OPACITY),
     )
 
     # Render text centered within plashka
@@ -163,7 +180,7 @@ def _build_slide_overlay(title: str, body: str | None) -> Image.Image:
     for line in title_lines:
         line_w = font_title.getlength(line)
         x = plashka_x0 + (plashka_w - line_w) / 2
-        draw.text((x, y), line, font=font_title, fill=TEXT_COLOR)
+        draw.text((x, y), line, font=font_title, fill=text_color)
         y += title_line_h
 
     if body_lines and font_body is not None:
@@ -171,7 +188,7 @@ def _build_slide_overlay(title: str, body: str | None) -> Image.Image:
         for line in body_lines:
             line_w = font_body.getlength(line)
             x = plashka_x0 + (plashka_w - line_w) / 2
-            draw.text((x, y), line, font=font_body, fill=TEXT_COLOR)
+            draw.text((x, y), line, font=font_body, fill=text_color)
             y += body_line_h
 
     return overlay
@@ -202,8 +219,14 @@ def _render_photo_slide_sync(
         top = (new_h - CANVAS_H) // 2
         base = scaled.crop((left, top, left + CANVAS_W, top + CANVAS_H))
 
+    # Sample bottom third of the photo to pick plashka variant automatically
+    sample_y = int(CANVAS_H * 0.67)
+    avg_luma = _sample_luma(base, sample_y)
+    bright_bg = avg_luma > PLASHKA_LUMA_THRESHOLD
+    logger.debug("Plashka auto-select: luma=%.1f → %s", avg_luma, "dark" if bright_bg else "light")
+
     base_rgba = base.convert("RGBA")
-    overlay = _build_slide_overlay(title, body)
+    overlay = _build_slide_overlay(title, body, bright_bg=bright_bg)
     composed = Image.alpha_composite(base_rgba, overlay).convert("RGB")
 
     output_path = Path(output_path)
