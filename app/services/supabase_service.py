@@ -123,3 +123,32 @@ async def list_user_items(chat_id: int) -> list[dict]:
         .execute()
     )
     return result.data
+
+
+# ── Phase 07: Carousel helpers ─────────────────────────────────────────────
+
+
+async def set_carousel_slides(item_id: str, payload: dict) -> None:
+    """Write payload dict (slides/caption_telegram/caption_instagram) as JSONB.
+
+    CRITICAL: pass dict directly, NOT model_dump_json() — that would store a
+    quoted string instead of a real JSON object (project-wide rule in CLAUDE.md).
+    """
+    client = _get_client()
+    await asyncio.to_thread(
+        lambda: client.table(TABLE)
+        .update({"carousel_slides": payload, "updated_at": _now()})
+        .eq("id", item_id)
+        .execute()
+    )
+
+
+async def set_stage_detail(item_id: str, detail: str) -> None:
+    """Write freeform progress text to stage_detail TEXT column (E1)."""
+    client = _get_client()
+    await asyncio.to_thread(
+        lambda: client.table(TABLE)
+        .update({"stage_detail": detail, "updated_at": _now()})
+        .eq("id", item_id)
+        .execute()
+    )
