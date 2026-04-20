@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 07-02-PLAN.md
-last_updated: "2026-04-20T20:41:42.787Z"
+stopped_at: Completed 07-instagram-carousel-mode-03-PLAN.md
+last_updated: "2026-04-20T21:00:15.133Z"
 last_activity: 2026-04-20
 progress:
   total_phases: 7
   completed_phases: 2
   total_plans: 13
-  completed_plans: 10
+  completed_plans: 11
   percent: 0
 ---
 
@@ -26,7 +26,7 @@ See: .planning/PROJECT.md (updated 2026-03-28)
 ## Current Position
 
 Phase: 07 (instagram-carousel-mode) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-04-20
 
@@ -62,6 +62,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03 P01 | 3min | 2 tasks | 2 files |
 | Phase quick-260420-k5u P01 | 35 | 3 tasks | 4 files |
 | Phase 07 P02 | 45 | 3 tasks | 14 files |
+| Phase 07-instagram-carousel-mode P03 | 45min | 4 tasks | 10 files |
 
 ## Accumulated Context
 
@@ -92,6 +93,8 @@ Recent decisions affecting current work:
 - [Phase quick-260420-k5u]: Smoke test stubs anthropic/dotenv/httpx/tenacity so it runs in any Python 3.12 env without full Cloud Run dep set
 - [Phase 07]: Module-level _chat() added to claude_service alongside ClaudeService class for testable carousel functions without touching existing code
 - [Phase 07]: Hand-rolled BaseMiddleware for album aggregation (1.5s debounce) instead of aiogram-media-group package
+- [Phase 07-instagram-carousel-mode]: Video slide bright_bg defaults to False (dark plashka) since source is not sampled for videos
+- [Phase 07-instagram-carousel-mode]: Thumbnail extraction runs after render_carousel so ffmpeg semaphore slots stay free during render
 
 ### Roadmap Evolution
 
@@ -107,6 +110,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-20T20:41:42.779Z
-Stopped at: Completed 07-02-PLAN.md
+Last session: 2026-04-20T21:00:15.125Z
+Stopped at: Completed 07-instagram-carousel-mode-03-PLAN.md
 Resume file: None

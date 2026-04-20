@@ -137,10 +137,10 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 **Goal:** Ship `/carousel` command producing IG-ready 10-slide carousels (photos + videos, 1080×1350, Russian text on semi-transparent plashka) via PIL + ffmpeg — NO Creatomate. Delivery via Telegram `send_media_group` for Romina to copy-paste into Instagram.
 **Requirements**: CAR-01 through CAR-15
 **Depends on:** None (independent — no overlap with Creatomate Reels pipeline)
-**Plans:** 2/4 plans executed
+**Plans:** 3/4 plans executed
 
 Plans:
 - [x] 07-01-PLAN.md — Supabase schema migration + carousel_service scaffold + design tokens + photo slide render + UAT Gate 1
 - [x] 07-02-PLAN.md — FSM + Claude brief-to-JSON + MediaGroupAggregator middleware + numbered preview with 4 inline buttons
-- [ ] 07-03-PLAN.md — Ingest pipeline + video slide render + retry budget + all-or-nothing delivery via send_media_group
+- [x] 07-03-PLAN.md — Ingest pipeline + video slide render + retry budget + all-or-nothing delivery via send_media_group
 - [ ] 07-04-PLAN.md — Cloud Run deploy flags (2Gi/2CPU/540s) + Pillow pins + .dockerignore + Romina UAT Gate 2
