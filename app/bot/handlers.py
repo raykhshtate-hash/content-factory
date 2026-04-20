@@ -995,7 +995,13 @@ async def analyze_and_propose(chat_id: int, item_id: str, gcs_uris: list[str], s
 
     # Pro for precise clip selection when story context exists (montage mode)
     gemini_model = "gemini-2.5-pro" if story_context else "gemini-2.5-flash"
-    analysis = await gemini.analyze_video(video_uris, prompt, model=gemini_model, audio_map=audio_map, voiceover_data=voiceover_data, analysis_mode=analysis_mode, story_context=story_context)
+    # Single-source talking_head: tightens Gemini prompt to preserve source order and cut only fillers
+    single_source = len(video_uris) == 1
+    analysis = await gemini.analyze_video(
+        video_uris, prompt, model=gemini_model, audio_map=audio_map,
+        voiceover_data=voiceover_data, analysis_mode=analysis_mode,
+        story_context=story_context, single_source=single_source,
+    )
     
     if not analysis:
         # Fallback Mode
@@ -1495,15 +1501,48 @@ async def _candidates_to_clips(candidates, gcs_uris: list[str], gcs_service: GCS
     _signed_cache: dict[str, str] = {}
     _duration_cache: dict[str, float] = {}
 
-    for c in candidates:
+    # ── Source-time overlap clamp (enhance mode safety net) ──
+    # Gemini occasionally returns overlapping timestamps within the same source,
+    # which causes the same speech to play twice. Clamp each clip's start to the
+    # previous clip's end (per video_index) preserving Gemini's original order.
+    parsed = []
+    for orig_idx, c in enumerate(candidates):
         if isinstance(c, dict):
-            start = _parse_mmss(c["start_time"])
-            end = _parse_mmss(c["end_time"])
+            p_start = _parse_mmss(c["start_time"])
+            p_end = _parse_mmss(c["end_time"])
+            p_vidx = c.get("video_index", 1)
+        else:
+            p_start = _parse_mmss(c.start_time)
+            p_end = _parse_mmss(c.end_time)
+            p_vidx = getattr(c, "video_index", 1)
+        parsed.append({"orig_idx": orig_idx, "v": p_vidx, "start": p_start, "end": p_end})
+
+    # Group by video_index, walk in original order, clamp overlaps
+    prev_end_per_video: dict[int, float] = {}
+    overrides: dict[int, tuple[float, float]] = {}  # orig_idx → (clamped_start, end)
+    for p in parsed:
+        prev_end = prev_end_per_video.get(p["v"])
+        s = p["start"]
+        e = p["end"]
+        if prev_end is not None and s < prev_end:
+            logger.warning(
+                "[overlap-clamp] v%d clip (orig_idx=%d) start %.2f < prev_end %.2f — clamping",
+                p["v"], p["orig_idx"], s, prev_end,
+            )
+            s = prev_end
+        if e < s:
+            # overlap ate the whole clip — skip via zero duration (filtered below)
+            e = s
+        overrides[p["orig_idx"]] = (s, e)
+        prev_end_per_video[p["v"]] = max(prev_end_per_video.get(p["v"], 0.0), e)
+
+    for orig_idx, c in enumerate(candidates):
+        if isinstance(c, dict):
             v_idx = c.get("video_index", 1) - 1
         else:
-            start = _parse_mmss(c.start_time)
-            end = _parse_mmss(c.end_time)
             v_idx = getattr(c, "video_index", 1) - 1
+
+        start, end = overrides[orig_idx]
 
         if v_idx < 0 or v_idx >= len(gcs_uris):
             v_idx = 0
@@ -1536,10 +1575,17 @@ async def _candidates_to_clips(candidates, gcs_uris: list[str], gcs_service: GCS
                                v_idx + 1, old_end, safe_dur, src_dur, end)
         clip_type = c.get("clip_type", "speech") if isinstance(c, dict) else getattr(c, "clip_type", "speech")
         matched_seg = c.get("matched_voiceover_segment") if isinstance(c, dict) else getattr(c, "matched_voiceover_segment", None)
+        trim_duration = end - start
+        if trim_duration <= 0:
+            logger.warning(
+                "[overlap-clamp] dropping zero-duration clip (v%d, orig_idx=%d)",
+                v_idx + 1, orig_idx,
+            )
+            continue
         clips.append(Clip(
             source=signed_url,
             trim_start=start,
-            trim_duration=end - start,
+            trim_duration=trim_duration,
             clip_type=clip_type,
             video_index=v_idx + 1,
             matched_voiceover_segment=matched_seg,
@@ -1627,6 +1673,26 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
     smart_storyboard_voiceover_url = None  # single-track voiceover for smart storyboard
     smart_storyboard_vo_duration = 0.0
     th_voiceover_gcs_uri = item.get("voiceover_gcs_uri")
+
+    # ── Enhance mode: single-source talking_head (no voiceover, all clips from one video) ──
+    # Force clean hard cuts + more stickers, skip SFX to avoid noise on continuous speech.
+    # Gemini prompt is tightened earlier in analyze_and_propose when single_source=True.
+    unique_video_indices = {c.video_index for c in clips}
+    enhance_mode = (
+        content_mode == "talking_head"
+        and not th_voiceover_gcs_uri
+        and len(unique_video_indices) == 1
+    )
+    if enhance_mode:
+        if style_params is None:
+            style_params = {}
+        style_params["enhance_mode"] = True
+        # More stickers to compensate for the visual monotony of a single source
+        style_params["sticker_count"] = min(max(3, len(clips) // 2), 5)
+        logger.info(
+            "[enhance_mode] single-source talking_head detected: %d clips, sticker_count=%d",
+            len(clips), style_params["sticker_count"],
+        )
 
     if content_mode == "storyboard":
         # ── Smart storyboard ──
@@ -1983,7 +2049,7 @@ async def _start_render(callback: types.CallbackQuery, item: dict, clips: list[C
             [c.trim_duration for c in clips],
             anchored_overlays=anchored_overlays if anchored_overlays else None,
             clips=clips if anchored_overlays else None,
-            skip_sfx=bool(smart_storyboard_voiceover_url),
+            skip_sfx=bool(smart_storyboard_voiceover_url) or enhance_mode,
         )
 
         render_id = await creatomate.submit_render(source, webhook_url)

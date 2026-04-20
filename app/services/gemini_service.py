@@ -246,6 +246,7 @@ class GeminiService:
         voiceover_data: dict | None = None,
         analysis_mode: str | None = None,
         story_context: str | None = None,
+        single_source: bool = False,
     ) -> Optional[VideoAnalysis]:
         """
         Analyze one or multiple videos directly from GCS via gs:// URIs.
@@ -253,6 +254,9 @@ class GeminiService:
 
         If audio_map is provided (from analyze_silence), Gemini receives
         speech/silence segment data and assigns clip_type per clip.
+
+        single_source=True signals enhance-mode for single-video talking_head:
+        Gemini must preserve source order and cut only fillers/pauses.
         """
         if not self.client:
             logger.error("Gemini client not configured")
@@ -260,6 +264,15 @@ class GeminiService:
 
         if isinstance(gcs_uris, str):
             gcs_uris = [gcs_uris]
+
+        # ── Enhance mode: single-source talking_head strict-order clause ──
+        # analysis_mode is None for talking_head (other modes: "smart", "smart_montage", "smart_narrative").
+        if single_source and analysis_mode is None:
+            prompt = (
+                "СТРОГО в порядке источника. Режь ТОЛЬКО вдохи/филлеры/паузы. "
+                "НЕ меняй порядок фрагментов. НЕ удаляй смысловые фразы. "
+                "Выходные timestamps должны монотонно возрастать.\n\n"
+            ) + prompt
 
         # ── Inject audio map into prompt if provided ──
         if audio_map:
