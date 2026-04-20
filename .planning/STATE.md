@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 03-01-PLAN.md
-last_updated: "2026-04-01T08:50:49.585Z"
-last_activity: 2026-04-01
+status: verifying
+stopped_at: Completed quick-260420-k5u-01-PLAN.md (enhance_mode for single-source talking_head)
+last_updated: "2026-04-20T12:56:30.908Z"
+last_activity: 2026-04-20
 progress:
   total_phases: 6
   completed_phases: 2
@@ -27,8 +27,8 @@ See: .planning/PROJECT.md (updated 2026-03-28)
 
 Phase: 03 (animated-text-sfx) — EXECUTING
 Plan: 3 of 3
-Status: Ready to execute
-Last activity: 2026-04-01
+Status: Phase complete — ready for verification
+Last activity: 2026-04-20
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -60,6 +60,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 02 P02 | 1min | 1 tasks | 2 files |
 | Phase 03 P02 | 4min | 1 tasks | 3 files |
 | Phase 03 P01 | 3min | 2 tasks | 2 files |
+| Phase quick-260420-k5u P01 | 35 | 3 tasks | 4 files |
 
 ## Accumulated Context
 
@@ -84,6 +85,10 @@ Recent decisions affecting current work:
 - [Phase 02]: GEMINI_PROMPT_V bumped to 1.1 for dedup/diversity/anti-linear prompt changes
 - [Phase 03]: GCSService instantiated per apply_visual_blueprint call for SFX presigned URLs (sync, fresh per render)
 - [Phase 03]: ALLOWED_TEXT_ANIMATIONS = {fade, slide-up, typewriter, pop} for per-clip animation selection
+- [Phase quick-260420-k5u]: Used analysis_mode is None as talking_head discriminator in gemini_service.py (literal 'talking_head' never set at runtime)
+- [Phase quick-260420-k5u]: Overlap clamp walks candidates in Gemini's original order per video_index (not re-sorted by start) to avoid silently reordering Gemini's chosen narrative
+- [Phase quick-260420-k5u]: Dropped zero-duration clips after overlap clamp with WARN log rather than raising — keeps pipeline robust when Gemini returns fully-eclipsed candidates
+- [Phase quick-260420-k5u]: Smoke test stubs anthropic/dotenv/httpx/tenacity so it runs in any Python 3.12 env without full Cloud Run dep set
 
 ### Pending Todos
 
@@ -95,6 +100,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-01T08:50:49.581Z
-Stopped at: Completed 03-01-PLAN.md
+Last session: 2026-04-20T12:56:30.896Z
+Stopped at: Completed quick-260420-k5u-01-PLAN.md (enhance_mode for single-source talking_head)
 Resume file: None
