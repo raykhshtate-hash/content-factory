@@ -17,6 +17,7 @@ from aiogram import Bot, Dispatcher
 
 from app.config import settings
 from app.bot.handlers import router as bot_router
+from app.bot.middlewares import MediaGroupAggregatorMiddleware
 from app.webhooks.creatomate_webhook import router as webhook_router
 
 # Initialize bot and dispatcher
@@ -24,6 +25,8 @@ from app.webhooks.creatomate_webhook import router as webhook_router
 bot = Bot(token=settings.BOT_TOKEN)
 dp = Dispatcher()
 dp.include_router(bot_router)
+# Phase 07: aggregate Telegram album messages before dispatching to handlers
+bot_router.message.outer_middleware(MediaGroupAggregatorMiddleware())
 
 polling_task = None
 
