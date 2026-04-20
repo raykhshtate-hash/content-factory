@@ -3360,15 +3360,198 @@ async def on_carousel_single_rejected(message: types.Message, state: FSMContext)
 
 
 @router.message(StateFilter(CarouselStates.awaiting_footage), F.media_group_id)
-async def on_carousel_album(message: types.Message, state: FSMContext, album: list | None = None) -> None:
-    """Receive photo album; stub — full render wired in Plan 07-03."""
+async def on_carousel_album(
+    message: types.Message,
+    state: FSMContext,
+    bot: Bot,
+    album: list | None = None,
+) -> None:
+    """Full carousel pipeline: preflight → ingest → render → GCS upload → deliver. (Plan 07-03)"""
+    import asyncio as _asyncio
+    from app.services.carousel_service import (
+        check_album_sizes,
+        ingest_album,
+        render_carousel,
+        extract_video_thumbnail,
+        deliver_carousel,
+        _build_slide_overlay,
+        MAX_ATTEMPTS,
+    )
+    from app.services import gcs_service
+
     photos = album if album else [message]
     data = await state.get_data()
-    item_id = data["item_id"]
-    await supabase_service.set_stage_detail(item_id, f"получено {len(photos)} фото (сборка в 07-03)")
-    await message.answer(
-        f"📸 Получил {len(photos)} фото. Сборка карусели будет реализована в следующем плане (07-03)."
-    )
+    item_id: str = data["item_id"]
+
+    # 1. >10 reject (E2)
+    if len(photos) > 10:
+        await message.answer("Максимум 10 медиа в одном альбоме. Отправь заново.")
+        return
+
+    # 2. Preflight >20MB BEFORE any bot.get_file (Pitfall 5)
+    ok, reject_text = await check_album_sizes(photos)
+    if not ok:
+        folder_hint = ""
+        if settings.DRIVE_CAROUSEL_FOLDER_ID:
+            folder_hint = (
+                f"\n\nDrive-папка: https://drive.google.com/drive/folders/"
+                f"{settings.DRIVE_CAROUSEL_FOLDER_ID}"
+            )
+        await message.answer((reject_text or "") + folder_hint)
+        return
+
+    await state.set_state(CarouselStates.assembling)
+    await supabase_service.set_stage_detail(item_id, "подготовка")
+    progress_msg = await message.answer("Собираю карусель…")
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="carousel-") as tmp_dir:  # Pitfall 7
+            tmp_path = Path(tmp_dir)
+
+            # 3. Ingest Telegram files to tmp_dir
+            ingested = await ingest_album(bot, photos, tmp_path)
+
+            # 4. Load approved slide payload from Supabase
+            row = await supabase_service.get_item(item_id)
+            payload = row["carousel_slides"]  # JSONB dict
+            slides_meta = sorted(payload.get("slides", []), key=lambda s: s["order"])
+
+            if len(ingested) < len(slides_meta):
+                await progress_msg.edit_text(
+                    f"Слайдов в карусели {len(slides_meta)}, а файлов получено {len(ingested)}. "
+                    "Пришли альбом с нужным количеством."
+                )
+                await state.set_state(CarouselStates.awaiting_footage)
+                return
+
+            # 5. Build render jobs pairing ingested files with slide metadata
+            render_jobs: list[dict] = []
+            for ingested_item, meta in zip(ingested, slides_meta):
+                slide_tmp = tmp_path / f"rendered_{meta['order']:02d}"
+                if ingested_item["kind"] == "photo":
+                    out_path = str(slide_tmp) + ".jpg"
+                    render_jobs.append({
+                        "kind": "photo",
+                        "order": meta["order"],
+                        "source": ingested_item["local_path"],
+                        "text_title": meta.get("text_title", ""),
+                        "text_body": meta.get("text_body", ""),
+                        "out": out_path,
+                        "rendered_path": out_path,
+                    })
+                else:
+                    # Build overlay PNG for video slide (bright_bg=False → dark plashka, safe default)
+                    overlay_path = str(tmp_path / f"overlay_{meta['order']:02d}.png")
+                    out_path = str(slide_tmp) + ".mp4"
+                    thumb_path = str(tmp_path / f"thumb_{meta['order']:02d}.jpg")
+                    overlay_img = _build_slide_overlay(
+                        meta.get("text_title", ""), meta.get("text_body", ""), bright_bg=False
+                    )
+                    await _asyncio.to_thread(overlay_img.save, overlay_path, "PNG")
+                    render_jobs.append({
+                        "kind": "video",
+                        "order": meta["order"],
+                        "source": ingested_item["local_path"],
+                        "overlay": overlay_path,
+                        "out": out_path,
+                        "rendered_path": out_path,
+                        "thumb_path": thumb_path,
+                        "text_title": meta.get("text_title", ""),
+                        "text_body": meta.get("text_body", ""),
+                    })
+
+            await supabase_service.set_stage_detail(item_id, f"рендер 0/{len(render_jobs)}")
+
+            # 6. Render with retry + total budget (render_carousel)
+            try:
+                results = await render_carousel(render_jobs)
+            except RuntimeError as e:
+                await progress_msg.edit_text(f"Карусель отменена: {e}")
+                await supabase_service.update_item(
+                    item_id, status="failed", stage_detail="timeout"
+                )
+                await state.clear()
+                return
+
+            # 7. All-or-nothing: any failed slide → abort delivery (CAR-12)
+            if not all(r["ok"] for r in results):
+                failed = [r for r in results if not r["ok"]]
+                await progress_msg.edit_text(
+                    f"Не удалось отрендерить {len(failed)} слайд(ов) после {MAX_ATTEMPTS} попыток. "
+                    "Попробуй ещё раз."
+                )
+                await supabase_service.update_item(
+                    item_id, status="failed", stage_detail="render_failed"
+                )
+                await state.clear()
+                return
+
+            # 8. Extract thumbnails for video slides (Pitfall 11)
+            for job in render_jobs:
+                if job["kind"] == "video":
+                    await extract_video_thumbnail(job["rendered_path"], job["thumb_path"])
+
+            await supabase_service.set_stage_detail(item_id, "загрузка в GCS")
+
+            # 9. Upload to GCS — manifest becomes single source of truth post-ingest
+            manifest_input = [
+                {
+                    "kind": j["kind"],
+                    "order": j["order"],
+                    "rendered_path": j["rendered_path"],
+                    "thumb_path": j.get("thumb_path"),
+                }
+                for j in render_jobs
+            ]
+            bucket_prefix = f"carousel-renders/{item_id}"
+            manifest = await gcs_service.upload_carousel_slides(manifest_input, bucket_prefix)
+
+            # 10. Deliver via send_media_group while tmp_dir still alive (FSInputFile reads local)
+            await state.set_state(CarouselStates.delivering)
+            await supabase_service.set_stage_detail(item_id, "доставка")
+
+            delivery_slides = [
+                {
+                    "kind": j["kind"],
+                    "order": j["order"],
+                    "rendered_path": j["rendered_path"],
+                    "thumb_path": j.get("thumb_path"),
+                }
+                for j in render_jobs
+            ]
+            await deliver_carousel(
+                bot=bot,
+                chat_id=message.chat.id,
+                slides=delivery_slides,
+                caption_telegram=payload.get("caption_telegram", ""),
+                caption_instagram=payload.get("caption_instagram", ""),
+            )
+
+            # 11. Persist approved status — gcs_render_uri points to GCS (not tmp)
+            first_gs = manifest[0].get("rendered_gs", "") if manifest else ""
+            await supabase_service.update_item(
+                item_id,
+                status="approved",
+                stage_detail=None,
+                gcs_render_uri=first_gs,
+            )
+            try:
+                await progress_msg.delete()
+            except Exception:
+                pass
+            await message.answer(f"Карусель готова ({len(render_jobs)} слайдов). ✅")
+            await state.clear()
+
+    except Exception as e:
+        logger.exception("carousel pipeline failed for item %s: %s", item_id, e)
+        await supabase_service.update_item(
+            item_id, status="failed", stage_detail=f"exception: {type(e).__name__}"
+        )
+        try:
+            await progress_msg.edit_text(f"Ошибка сборки карусели: {type(e).__name__}")
+        except Exception:
+            pass
+        await state.clear()
 
 
 # ── Fallback text handler — MUST be registered LAST ──────────────────────
