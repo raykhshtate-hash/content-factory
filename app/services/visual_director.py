@@ -429,6 +429,7 @@ def _validate_blueprint(
     max_stickers: int = DEFAULT_MAX_STICKERS,
     anchors: list[dict] | None = None,
     candidate_spans: list[dict] | None = None,
+    enhance_mode: bool = False,
 ) -> dict | None:
     """Validate blueprint. Returns cleaned blueprint or None if invalid."""
     clips = blueprint.get("clips")
@@ -437,6 +438,15 @@ def _validate_blueprint(
 
     if num_clips > 0 and clips[0].get("transition") is not None:
         return None
+
+    # ── Enhance mode: force all transitions to hard cuts ──
+    # Single-source talking_head looks cleaner without any fade/wipe between clips.
+    if enhance_mode:
+        for t in clips:
+            if isinstance(t, dict):
+                t["transition"] = None
+        blueprint["overall_style"] = "clean"
+        logger.info("enhance_mode: forced all transitions to clean (hard cut)")
 
     total_duration = sum(clip_durations)
 
@@ -814,6 +824,13 @@ async def get_visual_blueprint(
             f"\nКОЛИЧЕСТВО СТИКЕРОВ: используй ровно {max_stickers} стикеров, распредели их равномерно по таймлайну."
         )
 
+    if params.get("enhance_mode"):
+        style_lines.append(
+            "\nENHANCE MODE (single-source talking_head): используй overall_style=\"clean\". "
+            "ВСЕ переходы ДОЛЖНЫ быть жёсткими склейками (transition=null). "
+            "Сосредоточь креативную энергию на стикерах и оверлеях."
+        )
+
     style_params_block = "\n".join(style_lines) if style_lines else ""
 
     # Build clip contexts block with text overlay availability
@@ -982,6 +999,7 @@ async def get_visual_blueprint(
         validated = _validate_blueprint(
             blueprint, num_clips, clip_durations, max_stickers,
             anchors=anchors, candidate_spans=candidate_spans if use_candidate_mode else None,
+            enhance_mode=bool((style_params or {}).get("enhance_mode")),
         )
         if validated is None:
             logger.warning("Visual blueprint validation failed, using fallback")
