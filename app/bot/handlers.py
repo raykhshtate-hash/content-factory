@@ -1,5 +1,6 @@
 from aiogram import Router, types, F, Bot
 from aiogram.filters import Command
+from aiogram.types import FSInputFile
 
 from app.config import settings
 from app.services.claude_service import ClaudeService
@@ -9,6 +10,8 @@ from app.bot import messages
 
 import logging
 import re
+import tempfile
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -47,11 +50,62 @@ async def cmd_status(message: types.Message):
     
     await message.answer("\n".join(text_lines))
 
-@router.message(Command("reels", "post", "carousel", "stories"))
+# ── Phase 7: /carousel — handled separately from other formats so the
+# `/carousel sample` sub-command can render a preview slide. Plain `/carousel`
+# falls through to the same stub behavior as /reels /post /stories.
+@router.message(Command("carousel"))
+async def cmd_carousel(message: types.Message):
+    args = message.text.split(maxsplit=1)
+    subcommand = args[1].strip().lower() if len(args) > 1 else ""
+
+    if subcommand == "sample":
+        # Lazy import — avoids loading PIL/pillow-heif at module import time
+        # for users who never invoke carousel rendering.
+        from app.services.carousel_service import render_photo_slide
+
+        await message.answer("🎨 Рендерю демо-слайд…")
+        source = Path("tests/fixtures/sample.jpg")
+        if not source.exists():
+            await message.answer(
+                "❌ Demo fixture отсутствует (tests/fixtures/sample.jpg)."
+            )
+            return
+        with tempfile.TemporaryDirectory() as td:
+            out = Path(td) / "preview.jpg"
+            try:
+                await render_photo_slide(
+                    source,
+                    title="Предпросмотр дизайна",
+                    body="Инстаграм-карусель • 1080×1350 • плашка + Inter Bold",
+                    output_path=out,
+                )
+                await message.answer_photo(
+                    FSInputFile(str(out)),
+                    caption="Phase 7 preview — подтверди типографику и плашку.",
+                )
+            except Exception as e:
+                logger.exception("Sample slide render failed")
+                await message.answer(f"❌ Ошибка рендера: {e}")
+        return
+
+    # Default: mirror the existing /reels /post /stories stub behavior.
+    item = await supabase_service.create_content_item(
+        user_name=message.from_user.full_name,
+        chat_id=message.chat.id,
+        format="carousel",
+        status="idea",
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="У меня есть готовый сценарий 📝", callback_data=f"script:paste_ready:{item['id']}")]
+    ])
+    await message.answer(messages.FORMAT_SELECTED_MESSAGE.format(format="carousel"), reply_markup=keyboard)
+
+
+@router.message(Command("reels", "post", "stories"))
 async def cmd_format(message: types.Message):
     # Extract the format from the command (e.g., "/reels" -> "reels")
     command_text = message.text.split()[0].lower()
-    content_format = command_text[1:] 
+    content_format = command_text[1:]
 
     item = await supabase_service.create_content_item(
         user_name=message.from_user.full_name,
@@ -59,11 +113,11 @@ async def cmd_format(message: types.Message):
         format=content_format,
         status="idea",
     )
-    
+
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="У меня есть готовый сценарий 📝", callback_data=f"script:paste_ready:{item['id']}")]
     ])
-    
+
     await message.answer(messages.FORMAT_SELECTED_MESSAGE.format(format=content_format), reply_markup=keyboard)
 
 
