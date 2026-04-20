@@ -1,0 +1,49 @@
+# Build artefacts + caches
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Virtual envs + IDE
+venv
+.venv
+env
+.env.local
+.env.*.local
+.idea
+.vscode
+
+# Git + history
+.git
+.gitignore
+.github
+
+# Planning + docs (never needed at runtime)
+.planning
+.agents
+.claude
+tasks
+sessions
+*.md
+!README.md
+
+# Test fixtures (runtime doesn't need them)
+tests
+pytest.ini
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Secrets (belt-and-braces — deploy.sh handles them via --set-secrets anyway)
+service-account.json
+.env
+
+# IMPORTANT: assets/ MUST ship (carousel fonts live here).
+# Listing it as an explicit allow-entry for documentation.
+!assets
+!assets/**

@@ -26,6 +26,9 @@ gcloud run deploy "$SERVICE_NAME" \
   --region "$REGION" \
   --allow-unauthenticated \
   --no-cpu-throttling \
+  --memory 2Gi \
+  --cpu 2 \
+  --timeout 540 \
   --set-env-vars "$ENV_VARS" \
   --set-env-vars "GOOGLE_APPLICATION_CREDENTIALS=/secrets/service-account.json" \
   --set-secrets="/secrets/service-account.json=service-account-json:latest"
