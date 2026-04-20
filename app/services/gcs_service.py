@@ -6,8 +6,10 @@ Provides:
  - upload_from_url         — fetch a remote URL and stream it into GCS
  - download                — download blob contents as bytes
  - delete                  — delete a blob
+ - upload_carousel_slides  — async helper to upload carousel rendered files + thumbs
 """
 
+import asyncio
 import os
 import re
 from datetime import timedelta
@@ -116,3 +118,62 @@ class GCSService:
         bucket = self._client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
         blob.delete()
+
+    # ------------------------------------------------------------------
+    # upload_local_file
+    # ------------------------------------------------------------------
+    def upload_local_file(self, local_path: str, gs_uri: str) -> None:
+        """Upload a local file to GCS at the given gs:// URI."""
+        bucket_name, blob_name = _parse_gs_uri(gs_uri)
+        bucket = self._client.bucket(bucket_name)
+        blob = bucket.blob(blob_name)
+        blob.upload_from_filename(local_path)
+
+
+# ── Carousel upload helper (Plan 07-03) ─────────────────────────────────────
+
+
+async def upload_carousel_slides(items: list[dict], bucket_prefix: str) -> list[dict]:
+    """Upload rendered slide files + thumbnails to GCS.
+
+    Returns a manifest list with gs:// URIs and presigned URLs (6h expiry).
+    Each item in `items` is a dict with keys:
+      - kind: 'photo' | 'video'
+      - order: int
+      - rendered_path: str  (local path to rendered slide file)
+      - thumb_path: str | None  (local path to thumbnail JPEG, video only)
+
+    Returned manifest items contain:
+      - kind, order, rendered_gs, rendered_presigned
+      - thumb_gs, thumb_presigned  (video only, when thumb_path provided)
+    """
+    gcs = GCSService()
+    manifest: list[dict] = []
+
+    for item in items:
+        ext = "mp4" if item["kind"] == "video" else "jpg"
+        rendered_gs = (
+            f"gs://{gcs._default_bucket}/"
+            f"{bucket_prefix}/slide_{item['order']:02d}.{ext}"
+        )
+        await asyncio.to_thread(gcs.upload_local_file, item["rendered_path"], rendered_gs)
+
+        entry: dict = {
+            "kind": item["kind"],
+            "order": item["order"],
+            "rendered_gs": rendered_gs,
+            "rendered_presigned": gcs.generate_presigned_url(rendered_gs, expiration_minutes=360),
+        }
+
+        if item["kind"] == "video" and item.get("thumb_path"):
+            thumb_gs = (
+                f"gs://{gcs._default_bucket}/"
+                f"{bucket_prefix}/thumb_{item['order']:02d}.jpg"
+            )
+            await asyncio.to_thread(gcs.upload_local_file, item["thumb_path"], thumb_gs)
+            entry["thumb_gs"] = thumb_gs
+            entry["thumb_presigned"] = gcs.generate_presigned_url(thumb_gs, expiration_minutes=360)
+
+        manifest.append(entry)
+
+    return manifest

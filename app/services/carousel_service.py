@@ -361,3 +361,129 @@ async def extract_video_thumbnail(video_path: str, thumb_path: str) -> None:
         subprocess.run, cmd, check=True, capture_output=True, timeout=10,
     )
     logger.info("Extracted video thumbnail: %s", thumb_path)
+
+
+# ── Preflight + ingest + retry (Plan 07-03 Task 2) ─────────────────────────
+
+from html import escape as html_escape  # noqa: E402 — used later in deliver_carousel too
+
+# Bot API hard cap for getFile (Pitfall 5 — not 50MB)
+TELEGRAM_GETFILE_LIMIT = 20 * 1024 * 1024  # 20 MB
+
+MAX_ATTEMPTS = 2
+PER_SLIDE_TIMEOUT = 45.0   # seconds per slide render (G5)
+TOTAL_BUDGET = 450.0       # total carousel render budget in seconds (G5)
+
+
+async def check_album_sizes(album: list) -> tuple[bool, str | None]:
+    """Returns (ok, rejection_text).
+
+    Reads msg.photo[-1].file_size for photos and msg.video.file_size for
+    videos (never msg.document). Returns (False, Russian text) if ANY file
+    exceeds TELEGRAM_GETFILE_LIMIT (20MB Bot API hard cap — Pitfall 5).
+    The rejection text references Drive and /ready so the user knows what to do.
+    """
+    for i, msg in enumerate(album, start=1):
+        size: int | None = None
+        if getattr(msg, "photo", None):
+            # Use the largest PhotoSize with a known file_size
+            valid_sizes = [
+                p.file_size
+                for p in msg.photo
+                if getattr(p, "file_size", None) is not None
+            ]
+            size = max(valid_sizes) if valid_sizes else None
+        elif getattr(msg, "video", None):
+            size = getattr(msg.video, "file_size", None)
+
+        if size and size > TELEGRAM_GETFILE_LIMIT:
+            mb = size // (1024 * 1024)
+            return False, (
+                f"Файл #{i} ({mb}MB) слишком большой для Telegram (лимит 20MB). "
+                f"Загрузи все файлы в Drive-папку карусели и пришли /ready."
+            )
+    return True, None
+
+
+async def ingest_album(bot, album: list, tmp_dir: Path) -> list[dict]:
+    """Download each Telegram album message to tmp_dir/slide_XX.ext.
+
+    Returns a manifest: [{kind: 'photo'|'video', order: int, local_path: str}]
+    Uses msg.photo[-1] (largest) for photos and msg.video for videos.
+    """
+    items: list[dict] = []
+    for i, msg in enumerate(album, start=1):
+        if getattr(msg, "photo", None):
+            file_id = msg.photo[-1].file_id
+            kind, ext = "photo", ".jpg"
+        elif getattr(msg, "video", None):
+            file_id = msg.video.file_id
+            kind, ext = "video", ".mp4"
+        else:
+            # Non-photo/video in album — skip silently
+            continue
+        local_path = tmp_dir / f"slide_{i:02d}{ext}"
+        file = await bot.get_file(file_id)
+        await bot.download_file(file.file_path, destination=str(local_path))
+        items.append({"kind": kind, "order": i, "local_path": str(local_path)})
+    return items
+
+
+async def render_with_retry(slide: dict) -> dict:
+    """Render one slide with up to MAX_ATTEMPTS attempts.
+
+    Never raises — returns {ok: bool, attempts: int, order: int, error?: str}.
+    Catches asyncio.TimeoutError (from per_slide_timeout wrap in caller) and
+    any other exception. Each failed attempt is logged as a WARNING.
+    """
+    last_err: Exception | None = None
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            if slide["kind"] == "photo":
+                await render_photo_slide(
+                    slide["source"],
+                    slide["text_title"],
+                    slide.get("text_body"),
+                    slide["out"],
+                )
+            else:
+                await render_video_slide(
+                    slide["source"],
+                    slide["overlay"],
+                    slide["out"],
+                    PER_SLIDE_TIMEOUT,
+                )
+            return {"ok": True, "attempts": attempt, "order": slide.get("order")}
+        except Exception as e:  # noqa: BLE001 — intentional catch-all for retry
+            last_err = e
+            logger.warning(
+                "carousel slide %s attempt %d/%d failed: %s",
+                slide.get("order"), attempt, MAX_ATTEMPTS, e,
+            )
+    return {
+        "ok": False,
+        "attempts": MAX_ATTEMPTS,
+        "error": str(last_err),
+        "order": slide.get("order"),
+    }
+
+
+async def render_carousel(slides: list[dict]) -> list[dict]:
+    """Run render_with_retry on all slides within TOTAL_BUDGET seconds.
+
+    Returns list of result dicts from render_with_retry.
+    Caller must check `all(r['ok'] for r in results)` for all-or-nothing semantics.
+    Raises RuntimeError (with Russian 'бюджет' text) only on total-budget overflow.
+    """
+    coros = [render_with_retry(s) for s in slides]
+    try:
+        return list(
+            await asyncio.wait_for(
+                asyncio.gather(*coros),
+                timeout=TOTAL_BUDGET,
+            )
+        )
+    except asyncio.TimeoutError as e:
+        raise RuntimeError(
+            "Общий бюджет времени рендера превышен — карусель отменена"
+        ) from e
