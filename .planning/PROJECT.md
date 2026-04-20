@@ -30,9 +30,9 @@ Every reel should feel creatively directed — not just assembled — with feedb
 
 ### Active
 
-- [ ] Animated text overlays (motion text replacing static popups)
-- [ ] SFX pack (transition-matched sound effects on dedicated track)
-- [ ] Feedback loop v1 (approve/redo with Claude Haiku classification)
+- [x] Animated text overlays (motion text replacing static popups) — Phase 03-01/03-03, deployed rev 00090-gp6
+- [x] SFX pack (transition-matched sound effects on dedicated track) — Phase 03-02, deployed rev 00090-gp6
+- [x] Feedback loop v1 (approve/redo with Claude Haiku classification) — Phase 02, live in prod
 - [ ] Billing tracking (per-API cost logging + Telegram breakdown)
 - [ ] Regression harness for Gemini prompts (fixture-based assertions)
 - [ ] Prompt versioning (gemini + director versions in logs)

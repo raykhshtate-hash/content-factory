@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: verifying
-stopped_at: Completed quick-260420-k5u-01-PLAN.md (enhance_mode for single-source talking_head)
-last_updated: "2026-04-20T12:56:30.908Z"
+status: executing
+stopped_at: Completed 07-02-PLAN.md
+last_updated: "2026-04-20T20:41:42.787Z"
 last_activity: 2026-04-20
 progress:
-  total_phases: 6
+  total_phases: 7
   completed_phases: 2
-  total_plans: 9
-  completed_plans: 8
+  total_plans: 13
+  completed_plans: 10
   percent: 0
 ---
 
@@ -21,13 +21,13 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-28)
 
 **Core value:** Every reel should feel creatively directed — not just assembled — with feedback-driven iteration and a growing toolkit of visual effects.
-**Current focus:** Phase 03 — animated-text-sfx
+**Current focus:** Phase 07 — instagram-carousel-mode
 
 ## Current Position
 
-Phase: 03 (animated-text-sfx) — EXECUTING
-Plan: 3 of 3
-Status: Phase complete — ready for verification
+Phase: 07 (instagram-carousel-mode) — EXECUTING
+Plan: 2 of 4
+Status: Ready to execute
 Last activity: 2026-04-20
 
 Progress: [░░░░░░░░░░] 0%
@@ -61,6 +61,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 03 P02 | 4min | 1 tasks | 3 files |
 | Phase 03 P01 | 3min | 2 tasks | 2 files |
 | Phase quick-260420-k5u P01 | 35 | 3 tasks | 4 files |
+| Phase 07 P02 | 45 | 3 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -89,6 +90,12 @@ Recent decisions affecting current work:
 - [Phase quick-260420-k5u]: Overlap clamp walks candidates in Gemini's original order per video_index (not re-sorted by start) to avoid silently reordering Gemini's chosen narrative
 - [Phase quick-260420-k5u]: Dropped zero-duration clips after overlap clamp with WARN log rather than raising — keeps pipeline robust when Gemini returns fully-eclipsed candidates
 - [Phase quick-260420-k5u]: Smoke test stubs anthropic/dotenv/httpx/tenacity so it runs in any Python 3.12 env without full Cloud Run dep set
+- [Phase 07]: Module-level _chat() added to claude_service alongside ClaudeService class for testable carousel functions without touching existing code
+- [Phase 07]: Hand-rolled BaseMiddleware for album aggregation (1.5s debounce) instead of aiogram-media-group package
+
+### Roadmap Evolution
+
+- Phase 7 added: Instagram Carousel Mode (photos+videos, без Creatomate, PIL+ffmpeg, 10 слайдов 1080×1350). Closed-questions locked in `.planning/consilium/carousel-decisions.md`
 
 ### Pending Todos
 
@@ -100,6 +107,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-04-20T12:56:30.896Z
-Stopped at: Completed quick-260420-k5u-01-PLAN.md (enhance_mode for single-source talking_head)
+Last session: 2026-04-20T20:41:42.779Z
+Stopped at: Completed 07-02-PLAN.md
 Resume file: None

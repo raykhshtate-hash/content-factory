@@ -62,6 +62,24 @@ Requirements for Sprint 1+1.5 milestone. Each maps to roadmap phases.
 - [x] **STAB-03**: Render state saved to Supabase enabling "Retry render" button
 - [x] **STAB-04**: Error recovery preserves partial pipeline state (no full restart needed)
 
+### Instagram Carousel (Phase 7)
+
+- [ ] **CAR-01**: Supabase schema extended with `carousel_slides` JSONB column + `stage_detail` TEXT column (migration)
+- [ ] **CAR-02**: Design tokens module `assets/carousel_tokens.py` defines fonts, plashka opacity/radius/margin, text color/sizing, slide dimensions (1080×1350)
+- [ ] **CAR-03**: `assets/fonts/Inter-Bold.ttf` + `Inter-Regular.ttf` bundled with OFL.txt license; module-level font cache (`_FONTS: dict[int, FreeTypeFont]`)
+- [ ] **CAR-04**: `carousel_service.render_photo_slide()` renders JPEG (q=92) via PIL with pillow-heif HEIC support, semi-transparent plashka overlay + Russian text (emoji stripped, `draw.textbbox` centering, `asyncio.to_thread` wrap)
+- [ ] **CAR-05**: `carousel_service.render_video_slide()` renders MP4 via ffmpeg filter_complex (scale+crop to 1080×1350, overlay PNG), codec H.264 main/4.0/yuv420p/+faststart/-an, truncate >60s, concurrency capped via `asyncio.Semaphore(2)`
+- [ ] **CAR-06**: Video slide generates explicit JPEG thumbnail (<200KB, 320×320) for Telegram `InputMediaVideo` preview
+- [ ] **CAR-07**: Claude generates `carousel_slides` JSON + `caption_telegram` (≤1024) + `caption_instagram` (≤2200) from free-form Russian brief
+- [ ] **CAR-08**: `/carousel` FSM flow: awaiting_brief → analyzing → preview (numbered slides + 4 inline buttons: ✏️ edit / ✅ approve / 🔁 regenerate / ❌ reject) → awaiting_footage → assembling → delivering → approved
+- [ ] **CAR-09**: `MediaGroupAggregatorMiddleware` aggregates Telegram media_group with 1.5s debounce, sorts by `message_id`, hard-caps at 10 files; non-album uploads rejected with Russian error
+- [ ] **CAR-10**: Preflight >20MB file check rejects with Drive fallback prompt ("Файл слишком большой для Telegram. Загрузи в Drive-папку и пришли /ready.") using new `DRIVE_CAROUSEL_FOLDER_ID` env var
+- [ ] **CAR-11**: Per-slide `tempfile.TemporaryDirectory` cleanup on success AND failure paths; GCS manifest as single source of truth post-ingest
+- [ ] **CAR-12**: Bounded retry budget per slide (max_attempts=2, per_slide_timeout=30-45s, total=420-450s); all-or-nothing delivery (any slide fails 2 retries → status=failed, user notified, no partial delivery)
+- [ ] **CAR-13**: `send_media_group` delivers assembled carousel to Telegram with caption on first InputMedia; `caption_instagram` sent as follow-up message for copy-paste
+- [ ] **CAR-14**: `scripts/deploy.sh` adds `--memory 2Gi --timeout 540 --cpu 2`; `requirements.txt` adds `Pillow>=12` + `pillow-heif>=1.3`
+- [ ] **CAR-15**: Romina UAT gate — one approved carousel end-to-end in production before phase marked complete (typography/plashka visual parity with Reels)
+
 ## v2 Requirements
 
 Deferred to future milestones. Tracked but not in current roadmap.
@@ -136,10 +154,25 @@ Which phases cover which requirements. Updated during roadmap creation.
 | STAB-02 | Phase 1 | Complete |
 | STAB-03 | Phase 1 | Complete |
 | STAB-04 | Phase 1 | Complete |
+| CAR-01 | Phase 7 | Pending |
+| CAR-02 | Phase 7 | Pending |
+| CAR-03 | Phase 7 | Pending |
+| CAR-04 | Phase 7 | Pending |
+| CAR-05 | Phase 7 | Pending |
+| CAR-06 | Phase 7 | Pending |
+| CAR-07 | Phase 7 | Pending |
+| CAR-08 | Phase 7 | Pending |
+| CAR-09 | Phase 7 | Pending |
+| CAR-10 | Phase 7 | Pending |
+| CAR-11 | Phase 7 | Pending |
+| CAR-12 | Phase 7 | Pending |
+| CAR-13 | Phase 7 | Pending |
+| CAR-14 | Phase 7 | Pending |
+| CAR-15 | Phase 7 | Pending |
 
 **Coverage:**
-- v1 requirements: 34 total
-- Mapped to phases: 34
+- v1 requirements: 49 total
+- Mapped to phases: 49
 - Unmapped: 0
 
 ---
