@@ -1,7 +1,7 @@
 """Instagram Carousel slide rendering (Phase 7).
 
 Photo path: PIL → JPEG 1080x1350 with semi-transparent plashka overlay.
-Video path: ffmpeg filter_complex (NOT in this plan — lands in Plan 07-03).
+Video path: ffmpeg filter_complex (Plan 07-03+).
 
 All PIL work is sync; wrap caller in asyncio.to_thread when invoking from
 aiogram handlers. The public `render_photo_slide` does this already.
@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import subprocess
 from pathlib import Path
 
 import pillow_heif
@@ -267,3 +268,96 @@ async def render_photo_slide(
         body,
         Path(output_path),
     )
+
+
+# ── Video slide rendering (Plan 07-03) ─────────────────────────────────────
+
+# G1 — module-level semaphore, NOT per-instance. Caps concurrent ffmpeg renders
+# to prevent OOM on Cloud Run 2Gi when multiple slides render simultaneously.
+_FFMPEG_SEMAPHORE = asyncio.Semaphore(2)
+
+# E5 — Instagram carousel max video length
+_MAX_VIDEO_SECONDS = 60.0
+
+
+async def _probe_duration(path: str) -> float:
+    """ffprobe helper — returns float seconds. Raises on bad ffprobe output."""
+    cmd = [
+        "ffprobe", "-v", "error",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        path,
+    ]
+    proc = await asyncio.to_thread(
+        subprocess.run, cmd, check=True, capture_output=True, timeout=15,
+    )
+    return float(proc.stdout.decode().strip())
+
+
+async def render_video_slide(
+    source_path: str,
+    overlay_png_path: str,
+    out_path: str,
+    per_slide_timeout: float = 45.0,
+) -> None:
+    """Scale/crop source to 1080x1350, composite plashka overlay PNG, mute,
+    encode H.264 Main/4.0 yuv420p +faststart. Truncates to 60s (E5).
+    Obeys _FFMPEG_SEMAPHORE (G1) — max 2 concurrent ffmpeg processes.
+
+    Raises subprocess.CalledProcessError if ffmpeg fails.
+    """
+    src_duration = await _probe_duration(source_path)
+    duration = min(src_duration, _MAX_VIDEO_SECONDS)
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", source_path,
+        "-i", overlay_png_path,
+        "-filter_complex",
+        "[0:v]scale=1080:1350:force_original_aspect_ratio=increase,"
+        "crop=1080:1350,setsar=1[base];"
+        "[base][1:v]overlay=0:0[v]",
+        "-map", "[v]",
+        "-t", f"{duration:.3f}",
+        "-c:v", "libx264",
+        "-profile:v", "main",
+        "-level", "4.0",
+        "-pix_fmt", "yuv420p",
+        "-preset", "medium",
+        "-crf", "23",
+        "-movflags", "+faststart",
+        "-an",        # E4 — carousel videos are silent
+        out_path,
+    ]
+    async with _FFMPEG_SEMAPHORE:
+        await asyncio.to_thread(
+            subprocess.run,
+            cmd,
+            check=True,
+            capture_output=True,
+            timeout=per_slide_timeout,
+        )
+    logger.info("Rendered carousel video slide: %s (duration=%.1fs)", out_path, duration)
+
+
+async def extract_video_thumbnail(video_path: str, thumb_path: str) -> None:
+    """Extract a 320x320 JPEG thumbnail at t=0.5s from a video file.
+
+    Uses t=0.5s to avoid black frames from GOP-aligned encodes (Pitfall 14).
+    Does NOT consume _FFMPEG_SEMAPHORE — cheap single-frame operation.
+    Output is ≤200KB for use as InputMediaVideo.thumbnail (E6, CAR-06).
+    """
+    cmd = [
+        "ffmpeg", "-y",
+        "-ss", "0.5", "-i", video_path,
+        "-frames:v", "1",
+        "-vf",
+        "scale=320:320:force_original_aspect_ratio=decrease,"
+        "pad=320:320:(ow-iw)/2:(oh-ih)/2:black",
+        "-q:v", "5",   # ~70 JPEG quality — well under 200KB for 320×320
+        thumb_path,
+    ]
+    await asyncio.to_thread(
+        subprocess.run, cmd, check=True, capture_output=True, timeout=10,
+    )
+    logger.info("Extracted video thumbnail: %s", thumb_path)
