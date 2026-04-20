@@ -4,6 +4,8 @@ import re
 from pathlib import Path
 from anthropic import AsyncAnthropic
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
 
 # Load system prompt once at module level
@@ -353,3 +355,170 @@ async def classify_feedback(feedback_text: str, api_key: str) -> dict:
     except (json.JSONDecodeError, IndexError, KeyError) as e:
         logger.warning("Failed to parse Haiku classification: %s | raw: %s", e, response.content[0].text[:200])
         return {"gemini_instruction": feedback_text, "director_instruction": None}
+
+
+# ── Phase 07: Instagram Carousel brief → slides JSON ──────────────────────────
+
+_CAROUSEL_MODEL = "claude-sonnet-4-6"
+_carousel_client: AsyncAnthropic | None = None
+
+
+def _get_carousel_client() -> AsyncAnthropic:
+    global _carousel_client
+    if _carousel_client is None:
+        _carousel_client = AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
+    return _carousel_client
+
+
+async def _chat(prompt: str, system: str | None = None, max_tokens: int = 2048) -> str:
+    """Module-level single-turn chat using carousel client (reused by carousel functions)."""
+    client = _get_carousel_client()
+    kwargs: dict = {
+        "model": _CAROUSEL_MODEL,
+        "max_tokens": max_tokens,
+        "messages": [{"role": "user", "content": prompt}],
+    }
+    if system is not None:
+        kwargs["system"] = system
+    message = await client.messages.create(**kwargs)
+    return message.content[0].text.strip()
+
+
+CAROUSEL_SYSTEM = (
+    "Ты помогаешь Ромине (врач-косметолог) делать Instagram-карусели на русском. "
+    "Возвращаешь ТОЛЬКО JSON без markdown-обёртки."
+)
+
+CAROUSEL_PROMPT = """Из бриф-сообщения Ромины сгенерируй JSON со структурой (ровно
+столько слайдов, сколько логично, от 3 до 10):
+
+{{
+  "slides": [
+    {{"order": 1, "text_title": "...", "text_body": "..."}},
+    ...
+  ],
+  "caption_telegram": "...",
+  "caption_instagram": "..."
+}}
+
+Правила:
+- Заголовок слайда (text_title): ≤60 символов (БЕЗ emoji — PIL не рендерит)
+- Подпись слайда (text_body): ≤180 символов (БЕЗ emoji)
+- caption_telegram: ≤1024 символа (короткое превью для Telegram)
+- caption_instagram: ≤2200 символов (полный текст, emoji и хэштеги ОК)
+- Русский язык, клиентский тон Ромины
+- Не выдумывай медицинских фактов; если бриф короткий — формулируй нейтрально
+
+БРИФ: {brief}
+"""
+
+CAROUSEL_REGEN_PROMPT = """Пересобери ТОЛЬКО слайд #{slide_order} для Instagram-карусели
+на русском. Бриф и остальные слайды даны для контекста. Верни JSON одного слайда:
+
+{{"order": {slide_order}, "text_title": "...", "text_body": "..."}}
+
+Правила:
+- text_title: ≤60 символов, БЕЗ emoji
+- text_body: ≤180 символов, БЕЗ emoji
+- Не повторяй формулировки других слайдов
+{edit_hint_line}
+
+БРИФ: {brief}
+
+СОСЕДНИЕ СЛАЙДЫ:
+{sibling_block}
+"""
+
+
+def _strip_json_fence(raw: str) -> str:
+    return re.sub(r"^```(?:json)?\s*|\s*```\s*$", "", raw.strip(), flags=re.MULTILINE)
+
+
+def _validate_carousel_payload(payload: dict) -> None:
+    if not isinstance(payload, dict):
+        raise ValueError("Claude вернул не JSON-объект")
+    slides = payload.get("slides")
+    if not isinstance(slides, list) or not (3 <= len(slides) <= 10):
+        raise ValueError(
+            f"Ожидается 3-10 слайдов, получено "
+            f"{len(slides) if isinstance(slides, list) else 'не список'}"
+        )
+    seen_orders: set[int] = set()
+    for i, s in enumerate(slides, start=1):
+        if not isinstance(s, dict):
+            raise ValueError(f"Слайд #{i} не dict")
+        order = s.get("order")
+        title = s.get("text_title", "")
+        body = s.get("text_body", "")
+        if not isinstance(order, int):
+            raise ValueError(f"Слайд #{i}: order должен быть int")
+        if order in seen_orders:
+            raise ValueError(f"Слайд #{i}: повторяющийся order={order}")
+        seen_orders.add(order)
+        if not isinstance(title, str) or len(title) > 60:
+            raise ValueError(f"Слайд #{i}: text_title >60 символов или не строка")
+        if not isinstance(body, str) or len(body) > 180:
+            raise ValueError(f"Слайд #{i}: text_body >180 символов или не строка")
+    cap_tg = payload.get("caption_telegram", "")
+    cap_ig = payload.get("caption_instagram", "")
+    if not isinstance(cap_tg, str) or len(cap_tg) > 1024:
+        raise ValueError(f"caption_telegram >1024 символов ({len(cap_tg)})")
+    if not isinstance(cap_ig, str) or len(cap_ig) > 2200:
+        raise ValueError(f"caption_instagram >2200 символов ({len(cap_ig)})")
+
+
+async def generate_carousel_slides(brief: str) -> dict:
+    """Claude brief → carousel_slides JSON. Raises ValueError on malformed/invalid."""
+    prompt = CAROUSEL_PROMPT.format(brief=brief.strip())
+    raw = await _chat(prompt, system=CAROUSEL_SYSTEM, max_tokens=2048)
+    cleaned = _strip_json_fence(raw)
+    try:
+        payload = json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        logger.error("Claude carousel JSON parse failed: %s\nRaw: %s", e, cleaned[:500])
+        raise ValueError("Claude вернул невалидный JSON — попробуй упростить бриф") from e
+    _validate_carousel_payload(payload)
+    return payload
+
+
+async def regenerate_single_slide(
+    brief: str,
+    slides: list[dict],
+    slide_index: int,
+    edit_hint: str | None = None,
+) -> dict:
+    """Regenerate a single slide by index. Returns replacement slide dict."""
+    if not (0 <= slide_index < len(slides)):
+        raise ValueError(f"slide_index={slide_index} вне диапазона")
+    target = slides[slide_index]
+    siblings = [s for i, s in enumerate(slides) if i != slide_index]
+    sibling_block = "\n".join(
+        f"#{s['order']}: {s['text_title']} — {s['text_body']}" for s in siblings
+    )
+    edit_hint_line = f"- УКАЗАНИЕ ОТ РОМИНЫ: {edit_hint}" if edit_hint else ""
+    prompt = CAROUSEL_REGEN_PROMPT.format(
+        slide_order=target["order"],
+        brief=brief.strip(),
+        sibling_block=sibling_block,
+        edit_hint_line=edit_hint_line,
+    )
+    raw = await _chat(prompt, system=CAROUSEL_SYSTEM, max_tokens=512)
+    cleaned = _strip_json_fence(raw)
+    try:
+        new_slide = json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        raise ValueError("Claude вернул невалидный JSON для пересборки слайда") from e
+    if not isinstance(new_slide, dict):
+        raise ValueError("Пересобранный слайд не dict")
+    if new_slide.get("order") != target["order"]:
+        raise ValueError(
+            f"Claude вернул слайд с order={new_slide.get('order')}, "
+            f"ожидался {target['order']}"
+        )
+    title = new_slide.get("text_title", "")
+    body = new_slide.get("text_body", "")
+    if not isinstance(title, str) or len(title) > 60:
+        raise ValueError(f"text_title >60 символов ({len(title)})")
+    if not isinstance(body, str) or len(body) > 180:
+        raise ValueError(f"text_body >180 символов ({len(body)})")
+    return new_slide
