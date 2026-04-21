@@ -43,6 +43,18 @@ PLASHKA_MIN_WIDTH = 520          # adaptive width floor (short single-line text)
 # Legacy alias — kept for any test that imports TEXT_COLOR directly
 TEXT_COLOR = PLASHKA_TEXT_DARK
 
+# ── Subtitle overlay (video slides only) ──
+SUBTITLE_BG = (0, 0, 0)             # pure black background
+SUBTITLE_OPACITY = 175              # ~69% opacity
+SUBTITLE_TEXT_COLOR = (255, 255, 255)
+SUBTITLE_FONT_SIZE_TITLE = 64
+SUBTITLE_FONT_SIZE_BODY = 40
+SUBTITLE_LINE_HEIGHT_TITLE = 1.15
+SUBTITLE_LINE_HEIGHT_BODY = 1.30
+SUBTITLE_PADDING_X = 48             # horizontal text inset
+SUBTITLE_PADDING_Y = 32             # vertical padding inside bar
+SUBTITLE_GAP = 14                   # gap between title block and body block
+
 # ── Output ──
 PHOTO_JPEG_QUALITY = 92
 

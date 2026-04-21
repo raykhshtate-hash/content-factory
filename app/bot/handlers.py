@@ -3543,6 +3543,7 @@ async def _run_carousel_pipeline(
         extract_video_thumbnail,
         deliver_carousel,
         _build_slide_overlay,
+        _build_video_subtitle,
         MAX_ATTEMPTS,
     )
     from app.services import gcs_service
@@ -3589,11 +3590,9 @@ async def _run_carousel_pipeline(
                     overlay_path = str(tmp_path / f"overlay_{meta['order']:02d}.png")
                     out_path = str(slide_tmp) + ".mp4"
                     thumb_path = str(tmp_path / f"thumb_{meta['order']:02d}.jpg")
-                    overlay_img = _build_slide_overlay(
+                    overlay_img = _build_video_subtitle(
                         meta.get("text_title", ""),
                         meta.get("text_body", ""),
-                        bright_bg=False,
-                        position=position,
                     )
                     await _asyncio.to_thread(overlay_img.save, overlay_path, "PNG")
                     render_jobs.append({

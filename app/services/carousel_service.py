@@ -43,6 +43,16 @@ from assets.carousel_tokens import (
     PLASHKA_RADIUS,
     PLASHKA_TEXT_DARK,
     PLASHKA_TEXT_LIGHT,
+    SUBTITLE_BG,
+    SUBTITLE_OPACITY,
+    SUBTITLE_TEXT_COLOR,
+    SUBTITLE_FONT_SIZE_TITLE,
+    SUBTITLE_FONT_SIZE_BODY,
+    SUBTITLE_LINE_HEIGHT_TITLE,
+    SUBTITLE_LINE_HEIGHT_BODY,
+    SUBTITLE_PADDING_X,
+    SUBTITLE_PADDING_Y,
+    SUBTITLE_GAP,
 )
 
 VALID_PLASHKA_POSITIONS = {"top", "center", "bottom"}
@@ -234,6 +244,58 @@ def _build_slide_overlay(
             line_w = font_body.getlength(line)
             x = plashka_x0 + (plashka_w - line_w) / 2
             draw.text((x, y), line, font=font_body, fill=text_color)
+            y += body_line_h
+
+    return overlay
+
+
+def _build_video_subtitle(title: str, body: str | None) -> Image.Image:
+    """Return RGBA 1080x1350 overlay: transparent bg + full-width subtitle bar.
+
+    Bar is pinned to the bottom of the canvas — no border radius, no adaptive
+    width. Style mirrors broadcast subtitles: dark translucent band, white text.
+    Caller composites onto the rendered video frame via render_video_slide's
+    ffmpeg overlay input.
+    """
+    overlay = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    title_clean = _strip_emoji(title)
+    body_clean = _strip_emoji(body) if body else None
+
+    font_title = _get_font(FONT_BOLD_PATH, SUBTITLE_FONT_SIZE_TITLE)
+    font_body = _get_font(FONT_REGULAR_PATH, SUBTITLE_FONT_SIZE_BODY) if body_clean else None
+
+    wrap_width = CANVAS_W - 2 * SUBTITLE_PADDING_X
+
+    title_lines = _wrap_text(title_clean, font_title, wrap_width)
+    body_lines = _wrap_text(body_clean, font_body, wrap_width) if body_clean and font_body else []
+
+    title_line_h = int(SUBTITLE_FONT_SIZE_TITLE * SUBTITLE_LINE_HEIGHT_TITLE)
+    body_line_h = int(SUBTITLE_FONT_SIZE_BODY * SUBTITLE_LINE_HEIGHT_BODY)
+
+    title_block_h = title_line_h * len(title_lines)
+    body_block_h = body_line_h * len(body_lines)
+    gap = SUBTITLE_GAP if body_lines else 0
+
+    bar_h = SUBTITLE_PADDING_Y + title_block_h + gap + body_block_h + SUBTITLE_PADDING_Y
+    bar_y0 = CANVAS_H - bar_h
+
+    draw.rectangle([0, bar_y0, CANVAS_W, CANVAS_H], fill=(*SUBTITLE_BG, SUBTITLE_OPACITY))
+
+    y = bar_y0 + SUBTITLE_PADDING_Y
+    for line in title_lines:
+        line_w = font_title.getlength(line)
+        x = (CANVAS_W - line_w) / 2
+        draw.text((x, y), line, font=font_title, fill=SUBTITLE_TEXT_COLOR)
+        y += title_line_h
+
+    if body_lines and font_body is not None:
+        y += gap
+        for line in body_lines:
+            line_w = font_body.getlength(line)
+            x = (CANVAS_W - line_w) / 2
+            draw.text((x, y), line, font=font_body, fill=SUBTITLE_TEXT_COLOR)
             y += body_line_h
 
     return overlay
