@@ -580,6 +580,10 @@ from aiogram.utils.media_group import MediaGroupBuilder  # noqa: E402
 
 _IG_HINT = "Не забудь добавить trending audio в IG при публикации."
 
+# Telegram Bot API hard limit: max 10 items in a single send_media_group call.
+# Instagram carousel allows up to 20, so for 11–20 slides we ship multiple groups.
+_TG_MEDIA_GROUP_MAX = 10
+
 
 async def deliver_carousel(
     bot,
@@ -591,32 +595,40 @@ async def deliver_carousel(
     """Send the carousel via send_media_group with caption on the first media (Pitfall 4).
     Sends a follow-up HTML message wrapping caption_instagram in <code> for copy-paste.
 
+    Slides are chunked into groups of ≤10 (Telegram Bot API hard limit). Only the
+    first group carries caption_telegram; continuation groups are captionless.
+
     `slides` manifest shape (from render_carousel + local tmp_path files):
       [{kind: 'photo'|'video', order: int, rendered_path: str, thumb_path: str|None}]
 
     All video items MUST have thumb_path (required by Bot API — Pitfall 11).
     """
-    # MediaGroupBuilder(caption=...) attaches caption to the FIRST built InputMedia.
-    # Do NOT pass caption= to bot.send_media_group — that silently no-ops (Pitfall 4).
-    builder = MediaGroupBuilder(caption=caption_telegram)
+    sorted_slides = sorted(slides, key=lambda s: s["order"])
+    chunks = [
+        sorted_slides[i:i + _TG_MEDIA_GROUP_MAX]
+        for i in range(0, len(sorted_slides), _TG_MEDIA_GROUP_MAX)
+    ]
 
-    for slide in sorted(slides, key=lambda s: s["order"]):
-        media = FSInputFile(slide["rendered_path"])
-        if slide["kind"] == "photo":
-            builder.add_photo(media=media)
-        else:
-            thumb_path = slide.get("thumb_path")
-            if not thumb_path:
-                raise RuntimeError(
-                    f"Video slide {slide['order']} missing thumb_path — "
-                    "extract_video_thumbnail must run before deliver_carousel (Pitfall 11)"
+    for chunk_idx, chunk in enumerate(chunks):
+        # First chunk carries caption; rest are plain continuation groups.
+        caption = caption_telegram if chunk_idx == 0 else ""
+        builder = MediaGroupBuilder(caption=caption)
+        for slide in chunk:
+            media = FSInputFile(slide["rendered_path"])
+            if slide["kind"] == "photo":
+                builder.add_photo(media=media)
+            else:
+                thumb_path = slide.get("thumb_path")
+                if not thumb_path:
+                    raise RuntimeError(
+                        f"Video slide {slide['order']} missing thumb_path — "
+                        "extract_video_thumbnail must run before deliver_carousel (Pitfall 11)"
+                    )
+                builder.add_video(
+                    media=media,
+                    thumbnail=FSInputFile(thumb_path),
                 )
-            builder.add_video(
-                media=media,
-                thumbnail=FSInputFile(thumb_path),
-            )
-
-    await bot.send_media_group(chat_id=chat_id, media=builder.build())
+        await bot.send_media_group(chat_id=chat_id, media=builder.build())
 
     # Follow-up: IG caption for copy-paste + trending audio hint
     ig_text = caption_instagram or "(подпись не сгенерирована — добавь вручную)"
