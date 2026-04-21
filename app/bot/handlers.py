@@ -92,7 +92,7 @@ async def cmd_carousel(message: types.Message, state: FSMContext):
                 await message.answer(f"❌ Ошибка рендера: {e}")
         return
 
-    # Default: FSM carousel flow
+    # Default: FSM carousel flow — start by asking which mode
     item = await supabase_service.create_content_item(
         user_name=message.from_user.full_name or str(message.from_user.id),
         chat_id=message.chat.id,
@@ -100,15 +100,19 @@ async def cmd_carousel(message: types.Message, state: FSMContext):
         status="idea",
     )
     item_id = item["id"]
-    await supabase_service.set_stage_detail(item_id, "ожидание брифа")
-    await state.set_state(CarouselStates.awaiting_brief)
-    await state.update_data(item_id=item_id, approved_indices=[])
+    await supabase_service.set_stage_detail(item_id, "выбор режима")
+    await state.set_state(CarouselStates.awaiting_mode)
+    await state.update_data(item_id=item_id, approved_indices=[], mode=None)
+
+    mode_kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🧠 Клод соберёт по брифу", callback_data="car:mode:brief")],
+        [InlineKeyboardButton(text="📝 У меня готовые тексты", callback_data="car:mode:ready")],
+    ])
     await message.answer(
         "📸 <b>Карусель для Instagram</b>\n\n"
-        "Опиши тему и идею карусели — о чём контент, для кого, "
-        "какое настроение. Можно добавить ключевые тезисы.\n\n"
-        "Например: <i>Уход за кожей зимой — 5 правил для чувствительной кожи</i>",
+        "Как делаем?",
         parse_mode="HTML",
+        reply_markup=mode_kb,
     )
 
 
@@ -1155,7 +1159,9 @@ class AddClipState(StatesGroup):
 # ── Phase 07: Instagram Carousel FSM states ─────────────────────────────────
 
 class CarouselStates(StatesGroup):
+    awaiting_mode = State()       # choose brief vs ready-texts
     awaiting_brief = State()
+    awaiting_ready_texts = State()
     analyzing = State()
     preview = State()
     editing_slide = State()      # Per-slide text replacement substate
@@ -1165,14 +1171,42 @@ class CarouselStates(StatesGroup):
 
 
 def _build_slide_keyboard(item_id: str, slide_index: int) -> InlineKeyboardMarkup:
-    """4 inline buttons per slide: edit / approve / regenerate / reject (CAR-08)."""
+    """Per-slide inline buttons: edit / approve / regen / reject + plashka position."""
     kb = InlineKeyboardBuilder()
     kb.button(text="✏️ Редактировать", callback_data=f"car:edit:{item_id}:{slide_index}")
     kb.button(text="✅ Одобрить",      callback_data=f"car:approve:{item_id}:{slide_index}")
     kb.button(text="🔁 Перегенерить",  callback_data=f"car:regen:{item_id}:{slide_index}")
     kb.button(text="❌ Убрать",        callback_data=f"car:reject:{item_id}:{slide_index}")
-    kb.adjust(2)  # 2×2 grid
+    kb.button(text="⬆️ Верх",          callback_data=f"car:pos:{item_id}:{slide_index}:top")
+    kb.button(text="↔️ Центр",         callback_data=f"car:pos:{item_id}:{slide_index}:center")
+    kb.button(text="⬇️ Низ",           callback_data=f"car:pos:{item_id}:{slide_index}:bottom")
+    kb.adjust(2, 2, 3)  # action grid + position row
     return kb.as_markup()
+
+
+def _parse_ready_texts(raw: str) -> list[dict]:
+    """Parse Romina's pasted slide texts.
+
+    Format: blank-line-separated blocks; first line = text_title (≤60 chars),
+    remaining lines = text_body (joined with space, ≤180 chars).
+
+    Raises ValueError with a Russian message if blocks are out of range.
+    """
+    blocks = re.split(r"\n\s*\n+", raw.strip())
+    slides: list[dict] = []
+    for i, block in enumerate(blocks, start=1):
+        lines = [ln.strip() for ln in block.splitlines() if ln.strip()]
+        if not lines:
+            continue
+        title = lines[0][:60]
+        body = " ".join(lines[1:])[:180] if len(lines) > 1 else ""
+        slides.append({"order": len(slides) + 1, "text_title": title, "text_body": body})
+    if not (3 <= len(slides) <= 20):
+        raise ValueError(
+            f"Нужно от 3 до 20 слайдов, получено {len(slides)}. "
+            "Разделяй слайды пустой строкой; первая строка — заголовок, дальше — тело."
+        )
+    return slides
 
 
 def _build_bulk_keyboard(item_id: str) -> InlineKeyboardMarkup:
@@ -3193,6 +3227,80 @@ async def on_retry_render(callback: types.CallbackQuery):
 
 # ── Phase 07: Carousel FSM handlers ─────────────────────────────────────────
 
+@router.callback_query(StateFilter(CarouselStates.awaiting_mode), F.data.startswith("car:mode:"))
+async def on_carousel_mode(callback: types.CallbackQuery, state: FSMContext) -> None:
+    """Route into either brief input or ready-texts input based on Romina's choice."""
+    await callback.answer()
+    choice = callback.data.split(":")[2]
+    if choice == "brief":
+        await state.set_state(CarouselStates.awaiting_brief)
+        await callback.message.answer(
+            "✍️ Опиши тему и идею карусели — о чём контент, для кого, какое настроение. "
+            "Можно добавить ключевые тезисы.\n\n"
+            "Пример: <i>Уход за кожей зимой — 5 правил для чувствительной кожи</i>\n\n"
+            "💡 Количество слайдов Клод подберёт сам (3–20); позже его можно подогнать "
+            "под количество присланных фото/видео.",
+            parse_mode="HTML",
+        )
+    elif choice == "ready":
+        await state.set_state(CarouselStates.awaiting_ready_texts)
+        await callback.message.answer(
+            "📝 Пришли тексты слайдов одним сообщением.\n\n"
+            "<b>Формат:</b> слайды разделяй пустой строкой. "
+            "Первая строка блока — заголовок (≤60 симв.), остальные — тело (≤180 симв.).\n\n"
+            "<b>Пример:</b>\n"
+            "<code>Что такое ретинол\n"
+            "Активная форма витамина А, ускоряет обновление клеток.\n"
+            "\n"
+            "Кому подходит\n"
+            "Возраст 25+, жирная и комбинированная кожа.\n"
+            "\n"
+            "Как вводить\n"
+            "Начни с 2 раз в неделю, вечером, с SPF днём.</code>\n\n"
+            "Количество слайдов = количество блоков (3–20). "
+            "Подписи для Telegram и Instagram Клод сгенерирует автоматически.",
+            parse_mode="HTML",
+        )
+
+
+@router.message(StateFilter(CarouselStates.awaiting_ready_texts), F.text)
+async def on_carousel_ready_texts(message: types.Message, state: FSMContext) -> None:
+    """Parse pasted ready texts, generate captions via Claude, jump to preview."""
+    data = await state.get_data()
+    item_id = data["item_id"]
+
+    try:
+        slides = _parse_ready_texts(message.text)
+    except ValueError as e:
+        await message.answer(f"❌ {e}")
+        return
+
+    await supabase_service.set_stage_detail(item_id, "генерация подписей…")
+    await message.answer(f"✅ Распарсил {len(slides)} слайдов. Генерирую подписи…")
+
+    try:
+        captions = await claude_service.generate_captions_for_slides(slides)
+    except ValueError as e:
+        logger.warning("Captions generation failed: %s — using empty captions", e)
+        captions = {"caption_telegram": "", "caption_instagram": ""}
+
+    payload = {
+        "slides": slides,
+        "caption_telegram": captions["caption_telegram"],
+        "caption_instagram": captions["caption_instagram"],
+    }
+    await supabase_service.set_carousel_slides(item_id, payload)
+    await supabase_service.set_stage_detail(item_id, "предпросмотр")
+    # brief stores the raw paste so per-slide regen has context
+    await state.update_data(
+        brief=message.text,
+        carousel_payload=payload,
+        mode="ready_texts",
+    )
+    await state.set_state(CarouselStates.preview)
+    await _render_carousel_preview(message, item_id, payload)
+
+
 @router.message(StateFilter(CarouselStates.awaiting_brief), F.text)
 async def on_carousel_brief(message: types.Message, state: FSMContext) -> None:
     """Receive brief text, call Claude, transition to preview state."""
@@ -3211,7 +3319,7 @@ async def on_carousel_brief(message: types.Message, state: FSMContext) -> None:
 
     await supabase_service.set_carousel_slides(item_id, payload)
     await supabase_service.set_stage_detail(item_id, "предпросмотр")
-    await state.update_data(brief=message.text, carousel_payload=payload)
+    await state.update_data(brief=message.text, carousel_payload=payload, mode="brief")
     await state.set_state(CarouselStates.preview)
     await _render_carousel_preview(message, item_id, payload)
 
@@ -3236,8 +3344,8 @@ async def on_carousel_preview_cb(callback: types.CallbackQuery, state: FSMContex
         slides = payload.get("slides", [])
         if len(approved) >= len(slides):
             await callback.message.answer(
-                "✅ Все слайды одобрены! Теперь пришли фото для каждого слайда "
-                "(по одному или альбомом до 10 штук)."
+                "✅ Все слайды одобрены! Теперь пришли фото/видео для слайдов "
+                "(альбом или несколько альбомов, до 20 файлов)."
             )
             await supabase_service.set_stage_detail(item_id, "ожидание фото")
             await state.set_state(CarouselStates.awaiting_footage)
@@ -3251,8 +3359,8 @@ async def on_carousel_preview_cb(callback: types.CallbackQuery, state: FSMContex
         all_indices = list(range(len(slides)))
         await state.update_data(approved_indices=all_indices)
         await callback.message.answer(
-            "✅ Все слайды одобрены! Теперь пришли фото для каждого слайда "
-            "(по одному или альбомом до 10 штук)."
+            "✅ Все слайды одобрены! Теперь пришли фото/видео для слайдов "
+            "(альбом или несколько альбомов, до 20 файлов)."
         )
         await supabase_service.set_stage_detail(item_id, "ожидание фото")
         await state.set_state(CarouselStates.awaiting_footage)
@@ -3274,14 +3382,16 @@ async def on_carousel_preview_cb(callback: types.CallbackQuery, state: FSMContex
         slide_index = int(parts[3])
         slides = payload.get("slides", [])
         if 0 <= slide_index < len(slides):
-            slide = slides[slide_index]
             try:
                 new_slide = await claude_service.regenerate_single_slide(
                     brief=data.get("brief", ""),
-                    slide=slide,
+                    slides=slides,
                     slide_index=slide_index,
-                    total=len(slides),
                 )
+                # preserve plashka_position set earlier (if any)
+                existing_pos = slides[slide_index].get("plashka_position")
+                if existing_pos:
+                    new_slide["plashka_position"] = existing_pos
                 slides[slide_index] = new_slide
                 payload["slides"] = slides
                 await supabase_service.set_carousel_slides(item_id, payload)
@@ -3298,14 +3408,42 @@ async def on_carousel_preview_cb(callback: types.CallbackQuery, state: FSMContex
 
     elif action == "regen_all":
         brief = data.get("brief", "")
+        mode = data.get("mode", "brief")
         await callback.message.answer("🔁 Пересобираю все слайды…")
         try:
-            new_payload = await claude_service.generate_carousel_slides(brief)
+            if mode == "ready_texts":
+                # Ready-texts mode: re-parse the same paste, re-generate captions only
+                slides = _parse_ready_texts(brief)
+                captions = await claude_service.generate_captions_for_slides(slides)
+                new_payload = {
+                    "slides": slides,
+                    "caption_telegram": captions["caption_telegram"],
+                    "caption_instagram": captions["caption_instagram"],
+                }
+            else:
+                new_payload = await claude_service.generate_carousel_slides(brief)
             await supabase_service.set_carousel_slides(item_id, new_payload)
             await state.update_data(carousel_payload=new_payload, approved_indices=[])
             await _render_carousel_preview(callback.message, item_id, new_payload)
         except ValueError as e:
             await callback.message.answer(f"❌ {e}")
+
+    elif action == "pos":
+        # car:pos:{item_id}:{slide_index}:{position}
+        slide_index = int(parts[3])
+        position = parts[4] if len(parts) > 4 else "bottom"
+        if position not in {"top", "center", "bottom"}:
+            position = "bottom"
+        slides = payload.get("slides", [])
+        if 0 <= slide_index < len(slides):
+            slides[slide_index]["plashka_position"] = position
+            payload["slides"] = slides
+            await supabase_service.set_carousel_slides(item_id, payload)
+            await state.update_data(carousel_payload=payload)
+            human = {"top": "вверху", "center": "по центру", "bottom": "внизу"}[position]
+            await callback.message.answer(
+                f"📍 Слайд {slide_index + 1}: плашка {human}."
+            )
 
     elif action == "edit":
         slide_index = int(parts[3])
@@ -3350,27 +3488,29 @@ async def on_carousel_edit_text(message: types.Message, state: FSMContext) -> No
     )
 
 
-@router.message(StateFilter(CarouselStates.awaiting_footage), ~F.media_group_id, F.photo | F.video)
-async def on_carousel_single_rejected(message: types.Message, state: FSMContext) -> None:
-    """Tell user to send photos as an album, not one-by-one."""
-    await message.answer(
-        "📎 Пришли все фото одним альбомом (до 10 штук), "
-        "а не по одному — так легче сопоставить с слайдами."
-    )
+def _extract_media_info(msg) -> dict | None:
+    """Return {type, file_id, file_size} for a photo or video Message, else None."""
+    if getattr(msg, "photo", None):
+        largest = max(msg.photo, key=lambda p: p.file_size or 0)
+        return {"type": "photo", "file_id": largest.file_id, "file_size": largest.file_size or 0}
+    if getattr(msg, "video", None):
+        return {"type": "video", "file_id": msg.video.file_id, "file_size": msg.video.file_size or 0}
+    return None
 
 
-@router.message(StateFilter(CarouselStates.awaiting_footage), F.media_group_id)
-async def on_carousel_album(
+async def _run_carousel_pipeline(
+    bot: Bot,
     message: types.Message,
     state: FSMContext,
-    bot: Bot,
-    album: list | None = None,
+    item_id: str,
+    file_infos: list[dict],
+    payload: dict,
+    progress_msg: types.Message,
 ) -> None:
-    """Full carousel pipeline: preflight → ingest → render → GCS upload → deliver. (Plan 07-03)"""
+    """Ingest file_ids → render → GCS upload → deliver."""
     import asyncio as _asyncio
     from app.services.carousel_service import (
-        check_album_sizes,
-        ingest_album,
+        ingest_file_ids,
         render_carousel,
         extract_video_thumbnail,
         deliver_carousel,
@@ -3379,55 +3519,29 @@ async def on_carousel_album(
     )
     from app.services import gcs_service
 
-    photos = album if album else [message]
-    data = await state.get_data()
-    item_id: str = data["item_id"]
-
-    # 1. >10 reject (E2)
-    if len(photos) > 10:
-        await message.answer("Максимум 10 медиа в одном альбоме. Отправь заново.")
-        return
-
-    # 2. Preflight >20MB BEFORE any bot.get_file (Pitfall 5)
-    ok, reject_text = await check_album_sizes(photos)
-    if not ok:
-        folder_hint = ""
-        if settings.DRIVE_CAROUSEL_FOLDER_ID:
-            folder_hint = (
-                f"\n\nDrive-папка: https://drive.google.com/drive/folders/"
-                f"{settings.DRIVE_CAROUSEL_FOLDER_ID}"
-            )
-        await message.answer((reject_text or "") + folder_hint)
-        return
-
-    await state.set_state(CarouselStates.assembling)
-    await supabase_service.set_stage_detail(item_id, "подготовка")
-    progress_msg = await message.answer("Собираю карусель…")
+    slides_meta = sorted(payload.get("slides", []), key=lambda s: s["order"])
 
     try:
         with tempfile.TemporaryDirectory(prefix="carousel-") as tmp_dir:  # Pitfall 7
             tmp_path = Path(tmp_dir)
 
-            # 3. Ingest Telegram files to tmp_dir
-            ingested = await ingest_album(bot, photos, tmp_path)
-
-            # 4. Load approved slide payload from Supabase
-            row = await supabase_service.get_item(item_id)
-            payload = row["carousel_slides"]  # JSONB dict
-            slides_meta = sorted(payload.get("slides", []), key=lambda s: s["order"])
+            # Ingest — only take as many files as there are slides
+            ingested = await ingest_file_ids(bot, file_infos[:len(slides_meta)], tmp_path)
 
             if len(ingested) < len(slides_meta):
                 await progress_msg.edit_text(
-                    f"Слайдов в карусели {len(slides_meta)}, а файлов получено {len(ingested)}. "
-                    "Пришли альбом с нужным количеством."
+                    f"Слайдов {len(slides_meta)}, а файлов {len(ingested)}. "
+                    "Пришли ещё файлов и нажми «Начать сборку»."
                 )
                 await state.set_state(CarouselStates.awaiting_footage)
                 return
 
-            # 5. Build render jobs pairing ingested files with slide metadata
             render_jobs: list[dict] = []
             for ingested_item, meta in zip(ingested, slides_meta):
                 slide_tmp = tmp_path / f"rendered_{meta['order']:02d}"
+                position = meta.get("plashka_position", "bottom")
+                if position not in {"top", "center", "bottom"}:
+                    position = "bottom"
                 if ingested_item["kind"] == "photo":
                     out_path = str(slide_tmp) + ".jpg"
                     render_jobs.append({
@@ -3438,14 +3552,17 @@ async def on_carousel_album(
                         "text_body": meta.get("text_body", ""),
                         "out": out_path,
                         "rendered_path": out_path,
+                        "position": position,
                     })
                 else:
-                    # Build overlay PNG for video slide (bright_bg=False → dark plashka, safe default)
                     overlay_path = str(tmp_path / f"overlay_{meta['order']:02d}.png")
                     out_path = str(slide_tmp) + ".mp4"
                     thumb_path = str(tmp_path / f"thumb_{meta['order']:02d}.jpg")
                     overlay_img = _build_slide_overlay(
-                        meta.get("text_title", ""), meta.get("text_body", ""), bright_bg=False
+                        meta.get("text_title", ""),
+                        meta.get("text_body", ""),
+                        bright_bg=False,
+                        position=position,
                     )
                     await _asyncio.to_thread(overlay_img.save, overlay_path, "PNG")
                     render_jobs.append({
@@ -3458,11 +3575,11 @@ async def on_carousel_album(
                         "thumb_path": thumb_path,
                         "text_title": meta.get("text_title", ""),
                         "text_body": meta.get("text_body", ""),
+                        "position": position,
                     })
 
             await supabase_service.set_stage_detail(item_id, f"рендер 0/{len(render_jobs)}")
 
-            # 6. Render with retry + total budget (render_carousel)
             try:
                 results = await render_carousel(render_jobs)
             except RuntimeError as e:
@@ -3473,12 +3590,16 @@ async def on_carousel_album(
                 await state.clear()
                 return
 
-            # 7. All-or-nothing: any failed slide → abort delivery (CAR-12)
             if not all(r["ok"] for r in results):
                 failed = [r for r in results if not r["ok"]]
+                failed_lines = [
+                    f"  • Слайд {r.get('order', '?')}: {r.get('error') or 'unknown error'}"
+                    for r in failed
+                ]
                 await progress_msg.edit_text(
-                    f"Не удалось отрендерить {len(failed)} слайд(ов) после {MAX_ATTEMPTS} попыток. "
-                    "Попробуй ещё раз."
+                    f"Не удалось отрендерить {len(failed)} слайд(ов) после {MAX_ATTEMPTS} попыток:\n"
+                    + "\n".join(failed_lines)
+                    + "\n\nПопробуй ещё раз."
                 )
                 await supabase_service.update_item(
                     item_id, status="failed", stage_detail="render_failed"
@@ -3486,14 +3607,12 @@ async def on_carousel_album(
                 await state.clear()
                 return
 
-            # 8. Extract thumbnails for video slides (Pitfall 11)
             for job in render_jobs:
                 if job["kind"] == "video":
                     await extract_video_thumbnail(job["rendered_path"], job["thumb_path"])
 
             await supabase_service.set_stage_detail(item_id, "загрузка в GCS")
 
-            # 9. Upload to GCS — manifest becomes single source of truth post-ingest
             manifest_input = [
                 {
                     "kind": j["kind"],
@@ -3506,7 +3625,6 @@ async def on_carousel_album(
             bucket_prefix = f"carousel-renders/{item_id}"
             manifest = await gcs_service.upload_carousel_slides(manifest_input, bucket_prefix)
 
-            # 10. Deliver via send_media_group while tmp_dir still alive (FSInputFile reads local)
             await state.set_state(CarouselStates.delivering)
             await supabase_service.set_stage_detail(item_id, "доставка")
 
@@ -3527,7 +3645,6 @@ async def on_carousel_album(
                 caption_instagram=payload.get("caption_instagram", ""),
             )
 
-            # 11. Persist approved status — gcs_render_uri points to GCS (not tmp)
             first_gs = manifest[0].get("rendered_gs", "") if manifest else ""
             await supabase_service.update_item(
                 item_id,
@@ -3552,6 +3669,185 @@ async def on_carousel_album(
         except Exception:
             pass
         await state.clear()
+
+
+def _build_footage_keyboard(
+    collected_count: int,
+    slides_count: int,
+    mode: str,
+) -> InlineKeyboardMarkup:
+    """Keyboard shown after each footage upload.
+
+    - Start button appears once collected ≥ slides_count.
+    - "Regen under N slides" appears when counts differ AND mode == 'brief'.
+      (Ready-texts mode locks slide count to the paste.)
+    """
+    rows: list[list[InlineKeyboardButton]] = []
+    if collected_count >= slides_count and slides_count > 0:
+        rows.append([InlineKeyboardButton(
+            text=f"🚀 Начать сборку ({slides_count} слайдов)",
+            callback_data="car:start_render",
+        )])
+    if mode == "brief" and collected_count != slides_count and 3 <= collected_count <= 20:
+        rows.append([InlineKeyboardButton(
+            text=f"🔁 Пересобрать тексты под {collected_count} слайд(ов)",
+            callback_data=f"car:regen_count:{collected_count}",
+        )])
+    if not rows:
+        # Fallback: always give user at least one clickable option when possible
+        rows.append([InlineKeyboardButton(
+            text="ℹ️ Жду ещё файлы…",
+            callback_data="car:noop",
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.message(StateFilter(CarouselStates.awaiting_footage), ~F.media_group_id, F.photo | F.video)
+async def on_carousel_single_file(message: types.Message, state: FSMContext) -> None:
+    """Accumulate a single photo/video into collected_files."""
+    fi = _extract_media_info(message)
+    if fi is None:
+        return
+    from app.services.carousel_service import TELEGRAM_GETFILE_LIMIT
+    if fi["file_size"] > TELEGRAM_GETFILE_LIMIT:
+        mb = fi["file_size"] / 1024 / 1024
+        await message.answer(f"Файл ({mb:.1f}MB) слишком большой. Максимум 20MB.")
+        return
+    data = await state.get_data()
+    collected: list[dict] = data.get("collected_files", [])
+    collected.append(fi)
+    if len(collected) > 20:
+        collected = collected[:20]
+    await state.update_data(collected_files=collected)
+    item_id: str = data["item_id"]
+    row = await supabase_service.get_item(item_id)
+    payload = (row or {}).get("carousel_slides") or {}
+    total_needed = len(payload.get("slides", []))
+    mode = data.get("mode", "brief")
+    kb = _build_footage_keyboard(len(collected), total_needed, mode)
+    await message.answer(
+        f"📥 {len(collected)}/{total_needed} файл(ов). "
+        "Пришли ещё или жми кнопку ниже.",
+        reply_markup=kb,
+    )
+
+
+@router.message(StateFilter(CarouselStates.awaiting_footage), F.media_group_id)
+async def on_carousel_album(
+    message: types.Message,
+    state: FSMContext,
+    bot: Bot,
+    album: list | None = None,
+) -> None:
+    """Accumulate album file_ids into FSM. Runs preflight size check immediately."""
+    from app.services.carousel_service import check_album_sizes
+
+    photos = album if album else [message]
+    data = await state.get_data()
+    item_id: str = data["item_id"]
+
+    # Size check while we still have Message objects (Pitfall 5)
+    ok, reject_text = await check_album_sizes(photos)
+    if not ok:
+        folder_hint = ""
+        if settings.DRIVE_CAROUSEL_FOLDER_ID:
+            folder_hint = (
+                f"\n\nDrive-папка: https://drive.google.com/drive/folders/"
+                f"{settings.DRIVE_CAROUSEL_FOLDER_ID}"
+            )
+        await message.answer((reject_text or "") + folder_hint)
+        return
+
+    # Extract serialisable file_ids and accumulate
+    new_infos = [fi for msg in photos if (fi := _extract_media_info(msg)) is not None]
+    collected: list[dict] = data.get("collected_files", [])
+    collected.extend(new_infos)
+    if len(collected) > 20:
+        collected = collected[:20]
+    await state.update_data(collected_files=collected)
+
+    row = await supabase_service.get_item(item_id)
+    payload = (row or {}).get("carousel_slides") or {}
+    total_needed = len(payload.get("slides", []))
+    mode = data.get("mode", "brief")
+    kb = _build_footage_keyboard(len(collected), total_needed, mode)
+    await message.answer(
+        f"📥 Собрано {len(collected)}/{total_needed} файл(ов). "
+        "Можешь прислать ещё или жми кнопку ниже.",
+        reply_markup=kb,
+    )
+
+
+@router.callback_query(StateFilter(CarouselStates.awaiting_footage), F.data == "car:noop")
+async def on_carousel_noop(callback: types.CallbackQuery) -> None:
+    await callback.answer("Пришли ещё фото или видео.", show_alert=False)
+
+
+@router.callback_query(
+    StateFilter(CarouselStates.awaiting_footage),
+    F.data.startswith("car:regen_count:"),
+)
+async def on_carousel_regen_count(callback: types.CallbackQuery, state: FSMContext) -> None:
+    """Regenerate the whole carousel targeting exactly N slides (N = collected file count)."""
+    await callback.answer()
+    data = await state.get_data()
+    item_id: str = data["item_id"]
+    mode = data.get("mode", "brief")
+    if mode != "brief":
+        await callback.message.answer(
+            "В режиме «Готовые тексты» число слайдов задаётся твоим текстом — "
+            "пересборка под файлы здесь недоступна."
+        )
+        return
+    brief = data.get("brief", "")
+    try:
+        target_n = int(callback.data.split(":")[2])
+    except (IndexError, ValueError):
+        await callback.message.answer("❌ Не понял, сколько слайдов нужно.")
+        return
+
+    await callback.message.answer(f"🔁 Пересобираю под {target_n} слайдов…")
+    try:
+        new_payload = await claude_service.generate_carousel_slides(
+            brief, target_slides=target_n,
+        )
+    except ValueError as e:
+        await callback.message.answer(f"❌ {e}")
+        return
+
+    await supabase_service.set_carousel_slides(item_id, new_payload)
+    await state.update_data(
+        carousel_payload=new_payload,
+        approved_indices=list(range(len(new_payload["slides"]))),
+    )
+    await supabase_service.set_stage_detail(item_id, "предпросмотр (регенерация)")
+    await state.set_state(CarouselStates.preview)
+    await _render_carousel_preview(callback.message, item_id, new_payload)
+
+
+@router.callback_query(StateFilter(CarouselStates.awaiting_footage), F.data == "car:start_render")
+async def on_carousel_start_render(callback: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    """Validate collected files count and start the render pipeline."""
+    await callback.answer()
+    data = await state.get_data()
+    item_id: str = data["item_id"]
+    collected: list[dict] = data.get("collected_files", [])
+
+    row = await supabase_service.get_item(item_id)
+    payload = (row or {}).get("carousel_slides") or {}
+    slides_meta = payload.get("slides", [])
+
+    if len(collected) < len(slides_meta):
+        await callback.message.answer(
+            f"Нужно минимум {len(slides_meta)} файл(ов), а собрано {len(collected)}. "
+            "Пришли ещё фото/видео."
+        )
+        return
+
+    await state.set_state(CarouselStates.assembling)
+    await supabase_service.set_stage_detail(item_id, "подготовка")
+    progress_msg = await callback.message.answer("Собираю карусель…")
+    await _run_carousel_pipeline(bot, callback.message, state, item_id, collected, payload, progress_msg)
 
 
 # ── Fallback text handler — MUST be registered LAST ──────────────────────

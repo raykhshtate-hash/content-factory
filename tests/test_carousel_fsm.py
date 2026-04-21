@@ -28,7 +28,8 @@ def _make_message(text: str = "", chat_id: int = 111, user_id: int = 222) -> Mag
 
 
 @pytest.mark.asyncio
-async def test_cmd_carousel_sets_awaiting_brief(storage):
+async def test_cmd_carousel_sets_awaiting_mode(storage):
+    """After /carousel we wait for the user to choose brief vs ready-texts mode."""
     from aiogram.fsm.storage.base import StorageKey
     key = StorageKey(bot_id=0, chat_id=111, user_id=222)
     state = FSMContext(storage=storage, key=key)
@@ -39,7 +40,7 @@ async def test_cmd_carousel_sets_awaiting_brief(storage):
         await cmd_carousel(msg, state)
 
     current_state = await state.get_state()
-    assert current_state == CarouselStates.awaiting_brief.state
+    assert current_state == CarouselStates.awaiting_mode.state
     data = await state.get_data()
     assert data["item_id"] == "item-1"
     msg.answer.assert_awaited()

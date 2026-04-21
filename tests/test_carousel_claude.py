@@ -52,7 +52,7 @@ async def test_generate_raises_on_too_few_slides(sample_brief):
         "caption_instagram": "b",
     })
     with patch.object(claude_service, "_chat", new=AsyncMock(return_value=bad)):
-        with pytest.raises(ValueError, match="3-10 слайдов"):
+        with pytest.raises(ValueError, match="3-20 слайдов"):
             await claude_service.generate_carousel_slides(sample_brief)
 
 

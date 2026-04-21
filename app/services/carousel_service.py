@@ -34,7 +34,9 @@ from assets.carousel_tokens import (
     PLASHKA_BG_LIGHT,
     PLASHKA_LUMA_THRESHOLD,
     PLASHKA_MARGIN_BOTTOM,
+    PLASHKA_MARGIN_TOP,
     PLASHKA_MARGIN_X,
+    PLASHKA_MIN_WIDTH,
     PLASHKA_OPACITY,
     PLASHKA_PADDING_X,
     PLASHKA_PADDING_Y,
@@ -42,6 +44,8 @@ from assets.carousel_tokens import (
     PLASHKA_TEXT_DARK,
     PLASHKA_TEXT_LIGHT,
 )
+
+VALID_PLASHKA_POSITIONS = {"top", "center", "bottom"}
 
 logger = logging.getLogger(__name__)
 
@@ -116,23 +120,53 @@ def _wrap_text(
     return lines
 
 
-def _sample_luma(image: Image.Image, y_start: int) -> float:
-    """Return average luminance (0-255) of the bottom region of `image`.
+def _sample_luma(image: Image.Image, y0: int, y1: int) -> float:
+    """Return average luminance (0-255) of the strip [y0, y1) of `image`.
 
-    Samples the strip from y_start to canvas bottom, converted to grayscale.
-    Used to choose dark vs light plashka automatically.
+    Used to choose dark vs light plashka automatically based on the region the
+    plashka will actually occupy.
     """
-    region = image.crop((0, y_start, CANVAS_W, CANVAS_H)).convert("L")
+    y0 = max(0, int(y0))
+    y1 = min(CANVAS_H, int(y1))
+    if y1 <= y0:
+        return 128.0
+    region = image.crop((0, y0, CANVAS_W, y1)).convert("L")
     pixels = list(region.getdata())
     return sum(pixels) / len(pixels) if pixels else 128.0
 
 
-def _build_slide_overlay(title: str, body: str | None, bright_bg: bool) -> Image.Image:
+def _plashka_y_range(plashka_h: int, position: str) -> tuple[int, int]:
+    """Compute (y0, y1) for plashka based on position keyword."""
+    if position == "top":
+        y0 = PLASHKA_MARGIN_TOP
+        y1 = y0 + plashka_h
+    elif position == "center":
+        y0 = (CANVAS_H - plashka_h) // 2
+        y1 = y0 + plashka_h
+    else:  # bottom (default)
+        y1 = CANVAS_H - PLASHKA_MARGIN_BOTTOM
+        y0 = y1 - plashka_h
+    return y0, y1
+
+
+def _build_slide_overlay(
+    title: str,
+    body: str | None,
+    bright_bg: bool,
+    position: str = "bottom",
+) -> Image.Image:
     """Return RGBA 1080x1350 overlay: transparent bg + plashka + centered text.
 
     Caller composes onto base image via Image.alpha_composite.
     bright_bg=True → dark plashka; bright_bg=False → light plashka.
+    position: 'top' | 'center' | 'bottom' (default 'bottom').
+
+    Width is adaptive — fits the longest rendered line plus padding, clamped
+    between PLASHKA_MIN_WIDTH and (CANVAS_W - 2*PLASHKA_MARGIN_X).
     """
+    if position not in VALID_PLASHKA_POSITIONS:
+        position = "bottom"
+
     plashka_bg = PLASHKA_BG_DARK if bright_bg else PLASHKA_BG_LIGHT
     text_color = PLASHKA_TEXT_DARK if bright_bg else PLASHKA_TEXT_LIGHT
 
@@ -145,15 +179,28 @@ def _build_slide_overlay(title: str, body: str | None, bright_bg: bool) -> Image
     font_title = _get_font(FONT_BOLD_PATH, FONT_SIZE_TITLE)
     font_body = _get_font(FONT_REGULAR_PATH, FONT_SIZE_BODY) if body_clean else None
 
-    # Text-usable width inside plashka (canvas minus side margins minus padding)
-    plashka_inner_width = CANVAS_W - 2 * PLASHKA_MARGIN_X - 2 * PLASHKA_PADDING_X
+    # Max available inner width (wrap cap). Final plashka width may shrink below this
+    # to fit actual text — see adaptive-width step below.
+    max_plashka_w = CANVAS_W - 2 * PLASHKA_MARGIN_X
+    wrap_inner_width = max_plashka_w - 2 * PLASHKA_PADDING_X
 
-    title_lines = _wrap_text(title_clean, font_title, plashka_inner_width)
+    title_lines = _wrap_text(title_clean, font_title, wrap_inner_width)
     body_lines = (
-        _wrap_text(body_clean, font_body, plashka_inner_width)
+        _wrap_text(body_clean, font_body, wrap_inner_width)
         if body_clean and font_body
         else []
     )
+
+    # ── Adaptive width: plashka hugs the longest rendered line ──
+    longest_line = 0.0
+    for line in title_lines:
+        longest_line = max(longest_line, font_title.getlength(line))
+    if font_body is not None:
+        for line in body_lines:
+            longest_line = max(longest_line, font_body.getlength(line))
+    plashka_w = int(longest_line) + 2 * PLASHKA_PADDING_X
+    plashka_w = max(PLASHKA_MIN_WIDTH, min(plashka_w, max_plashka_w))
+    plashka_x0 = (CANVAS_W - plashka_w) // 2
 
     title_line_h = int(FONT_SIZE_TITLE * LINE_HEIGHT_TITLE)
     body_line_h = int(FONT_SIZE_BODY * LINE_HEIGHT_BODY)
@@ -164,10 +211,7 @@ def _build_slide_overlay(title: str, body: str | None, bright_bg: bool) -> Image
     text_block_h = title_block_h + gap_between + body_block_h
 
     plashka_h = text_block_h + 2 * PLASHKA_PADDING_Y
-    plashka_w = CANVAS_W - 2 * PLASHKA_MARGIN_X
-    plashka_x0 = PLASHKA_MARGIN_X
-    plashka_y1 = CANVAS_H - PLASHKA_MARGIN_BOTTOM
-    plashka_y0 = plashka_y1 - plashka_h
+    plashka_y0, plashka_y1 = _plashka_y_range(plashka_h, position)
 
     # Semi-transparent rounded plashka
     draw.rounded_rectangle(
@@ -195,11 +239,25 @@ def _build_slide_overlay(title: str, body: str | None, bright_bg: bool) -> Image
     return overlay
 
 
+def _luma_sample_range(position: str) -> tuple[int, int]:
+    """Return (y0, y1) range to sample for dark/light plashka auto-select.
+
+    Samples the part of the photo the plashka will cover, so color choice
+    matches the actual region — not always the bottom third.
+    """
+    if position == "top":
+        return 0, int(CANVAS_H * 0.33)
+    if position == "center":
+        return int(CANVAS_H * 0.33), int(CANVAS_H * 0.67)
+    return int(CANVAS_H * 0.67), CANVAS_H
+
+
 def _render_photo_slide_sync(
     source_path: Path,
     title: str,
     body: str | None,
     output_path: Path,
+    position: str = "bottom",
 ) -> Path:
     """Sync photo slide renderer. Wrapped by `render_photo_slide` for async."""
     with Image.open(source_path) as src:
@@ -220,22 +278,25 @@ def _render_photo_slide_sync(
         top = (new_h - CANVAS_H) // 2
         base = scaled.crop((left, top, left + CANVAS_W, top + CANVAS_H))
 
-    # Sample bottom third of the photo to pick plashka variant automatically
-    sample_y = int(CANVAS_H * 0.67)
-    avg_luma = _sample_luma(base, sample_y)
+    # Sample region that plashka will cover to pick dark/light variant
+    sample_y0, sample_y1 = _luma_sample_range(position)
+    avg_luma = _sample_luma(base, sample_y0, sample_y1)
     bright_bg = avg_luma > PLASHKA_LUMA_THRESHOLD
-    logger.debug("Plashka auto-select: luma=%.1f → %s", avg_luma, "dark" if bright_bg else "light")
+    logger.debug(
+        "Plashka auto-select: pos=%s luma=%.1f → %s",
+        position, avg_luma, "dark" if bright_bg else "light",
+    )
 
     base_rgba = base.convert("RGBA")
-    overlay = _build_slide_overlay(title, body, bright_bg=bright_bg)
+    overlay = _build_slide_overlay(title, body, bright_bg=bright_bg, position=position)
     composed = Image.alpha_composite(base_rgba, overlay).convert("RGB")
 
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     composed.save(output_path, "JPEG", quality=PHOTO_JPEG_QUALITY, optimize=True)
     logger.info(
-        "Rendered carousel photo slide: %s (%dx%d)",
-        output_path, CANVAS_W, CANVAS_H,
+        "Rendered carousel photo slide: %s (%dx%d, pos=%s)",
+        output_path, CANVAS_W, CANVAS_H, position,
     )
     return output_path
 
@@ -248,12 +309,15 @@ async def render_photo_slide(
     title: str,
     body: str | None,
     output_path: str | Path,
+    position: str = "bottom",
 ) -> Path:
     """Render one 1080x1350 JPEG slide with semi-transparent plashka + Russian text.
 
     Wraps the sync PIL pipeline in asyncio.to_thread so this is safe to call
     from aiogram handlers without blocking the event loop. Source may be
     JPG/PNG/HEIC (pillow_heif opener registered at module import).
+
+    position: 'top' | 'center' | 'bottom' — where to place the plashka.
 
     Raises:
         FileNotFoundError: if `source_path` does not exist.
@@ -267,6 +331,7 @@ async def render_photo_slide(
         title,
         body,
         Path(output_path),
+        position,
     )
 
 
@@ -298,7 +363,7 @@ async def render_video_slide(
     source_path: str,
     overlay_png_path: str,
     out_path: str,
-    per_slide_timeout: float = 45.0,
+    per_slide_timeout: float = 90.0,
 ) -> None:
     """Scale/crop source to 1080x1350, composite plashka overlay PNG, mute,
     encode H.264 Main/4.0 yuv420p +faststart. Truncates to 60s (E5).
@@ -323,7 +388,7 @@ async def render_video_slide(
         "-profile:v", "main",
         "-level", "4.0",
         "-pix_fmt", "yuv420p",
-        "-preset", "medium",
+        "-preset", "fast",
         "-crf", "23",
         "-movflags", "+faststart",
         "-an",        # E4 — carousel videos are silent
@@ -371,8 +436,8 @@ from html import escape as html_escape  # noqa: E402 — used later in deliver_c
 TELEGRAM_GETFILE_LIMIT = 20 * 1024 * 1024  # 20 MB
 
 MAX_ATTEMPTS = 2
-PER_SLIDE_TIMEOUT = 45.0   # seconds per slide render (G5)
-TOTAL_BUDGET = 450.0       # total carousel render budget in seconds (G5)
+PER_SLIDE_TIMEOUT = 90.0   # seconds per slide render (bumped from 45 — ffmpeg timed out on 22s videos under CPU contention)
+TOTAL_BUDGET = 520.0       # total carousel render budget in seconds (bumped from 450 — stays under Cloud Run 540s limit)
 
 
 async def check_album_sizes(album: list) -> tuple[bool, str | None]:
@@ -429,6 +494,23 @@ async def ingest_album(bot, album: list, tmp_dir: Path) -> list[dict]:
     return items
 
 
+async def ingest_file_ids(bot, file_infos: list[dict], tmp_dir: Path) -> list[dict]:
+    """Download files from stored file_id list to tmp_dir.
+
+    file_infos: [{type: 'photo'|'video', file_id: str}]
+    Returns manifest: [{kind, order, local_path}]
+    """
+    items: list[dict] = []
+    for i, fi in enumerate(file_infos, start=1):
+        kind = fi["type"]
+        ext = ".jpg" if kind == "photo" else ".mp4"
+        local_path = tmp_dir / f"slide_{i:02d}{ext}"
+        tg_file = await bot.get_file(fi["file_id"])
+        await bot.download_file(tg_file.file_path, destination=str(local_path))
+        items.append({"kind": kind, "order": i, "local_path": str(local_path)})
+    return items
+
+
 async def render_with_retry(slide: dict) -> dict:
     """Render one slide with up to MAX_ATTEMPTS attempts.
 
@@ -437,6 +519,7 @@ async def render_with_retry(slide: dict) -> dict:
     any other exception. Each failed attempt is logged as a WARNING.
     """
     last_err: Exception | None = None
+    position = slide.get("position", "bottom")
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             if slide["kind"] == "photo":
@@ -445,6 +528,7 @@ async def render_with_retry(slide: dict) -> dict:
                     slide["text_title"],
                     slide.get("text_body"),
                     slide["out"],
+                    position=position,
                 )
             else:
                 await render_video_slide(

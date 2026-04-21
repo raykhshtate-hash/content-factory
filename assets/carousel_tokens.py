@@ -37,6 +37,8 @@ PLASHKA_PADDING_X = 56
 PLASHKA_PADDING_Y = 40
 PLASHKA_MARGIN_X = 72            # gap between plashka edge and canvas edge
 PLASHKA_MARGIN_BOTTOM = 96       # gap between plashka bottom and canvas bottom
+PLASHKA_MARGIN_TOP = 96          # gap between plashka top and canvas top (when position=top)
+PLASHKA_MIN_WIDTH = 520          # adaptive width floor (short single-line text)
 
 # Legacy alias — kept for any test that imports TEXT_COLOR directly
 TEXT_COLOR = PLASHKA_TEXT_DARK

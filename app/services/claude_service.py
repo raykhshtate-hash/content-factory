@@ -389,8 +389,7 @@ CAROUSEL_SYSTEM = (
     "Возвращаешь ТОЛЬКО JSON без markdown-обёртки."
 )
 
-CAROUSEL_PROMPT = """Из бриф-сообщения Ромины сгенерируй JSON со структурой (ровно
-столько слайдов, сколько логично, от 3 до 10):
+CAROUSEL_PROMPT = """Из бриф-сообщения Ромины сгенерируй JSON со структурой:
 
 {{
   "slides": [
@@ -402,6 +401,7 @@ CAROUSEL_PROMPT = """Из бриф-сообщения Ромины сгенер�
 }}
 
 Правила:
+- Количество слайдов: {slides_rule}
 - Заголовок слайда (text_title): ≤60 символов (БЕЗ emoji — PIL не рендерит)
 - Подпись слайда (text_body): ≤180 символов (БЕЗ emoji)
 - caption_telegram: ≤1024 символа (короткое превью для Telegram)
@@ -410,6 +410,23 @@ CAROUSEL_PROMPT = """Из бриф-сообщения Ромины сгенер�
 - Не выдумывай медицинских фактов; если бриф короткий — формулируй нейтрально
 
 БРИФ: {brief}
+"""
+
+CAROUSEL_CAPTIONS_PROMPT = """По готовым слайдам Instagram-карусели сгенерируй две подписи.
+Верни ТОЛЬКО JSON:
+
+{{
+  "caption_telegram": "...",
+  "caption_instagram": "..."
+}}
+
+Правила:
+- caption_telegram: ≤1024 символа, короткое превью для Telegram
+- caption_instagram: ≤2200 символов, полный текст, emoji и хэштеги ОК, клиентский тон Ромины
+- Русский язык
+
+СЛАЙДЫ:
+{slides_block}
 """
 
 CAROUSEL_REGEN_PROMPT = """Пересобери ТОЛЬКО слайд #{slide_order} для Instagram-карусели
@@ -438,9 +455,9 @@ def _validate_carousel_payload(payload: dict) -> None:
     if not isinstance(payload, dict):
         raise ValueError("Claude вернул не JSON-объект")
     slides = payload.get("slides")
-    if not isinstance(slides, list) or not (3 <= len(slides) <= 10):
+    if not isinstance(slides, list) or not (3 <= len(slides) <= 20):
         raise ValueError(
-            f"Ожидается 3-10 слайдов, получено "
+            f"Ожидается 3-20 слайдов, получено "
             f"{len(slides) if isinstance(slides, list) else 'не список'}"
         )
     seen_orders: set[int] = set()
@@ -467,10 +484,22 @@ def _validate_carousel_payload(payload: dict) -> None:
         raise ValueError(f"caption_instagram >2200 символов ({len(cap_ig)})")
 
 
-async def generate_carousel_slides(brief: str) -> dict:
-    """Claude brief → carousel_slides JSON. Raises ValueError on malformed/invalid."""
-    prompt = CAROUSEL_PROMPT.format(brief=brief.strip())
-    raw = await _chat(prompt, system=CAROUSEL_SYSTEM, max_tokens=2048)
+async def generate_carousel_slides(brief: str, target_slides: int | None = None) -> dict:
+    """Claude brief → carousel_slides JSON. Raises ValueError on malformed/invalid.
+
+    target_slides: if provided, Claude generates EXACTLY this many slides (used when
+    the user has already uploaded media and slide count must match file count).
+    When None, Claude picks a logical count between 3 and 20.
+    """
+    if target_slides is not None:
+        if not (3 <= target_slides <= 20):
+            raise ValueError(f"target_slides должен быть от 3 до 20, получено {target_slides}")
+        slides_rule = f"РОВНО {target_slides} слайдов, ни больше, ни меньше"
+    else:
+        slides_rule = "от 3 до 20, сколько логично раскрывает тему"
+
+    prompt = CAROUSEL_PROMPT.format(brief=brief.strip(), slides_rule=slides_rule)
+    raw = await _chat(prompt, system=CAROUSEL_SYSTEM, max_tokens=8192)
     cleaned = _strip_json_fence(raw)
     try:
         payload = json.loads(cleaned)
@@ -478,7 +507,42 @@ async def generate_carousel_slides(brief: str) -> dict:
         logger.error("Claude carousel JSON parse failed: %s\nRaw: %s", e, cleaned[:500])
         raise ValueError("Claude вернул невалидный JSON — попробуй упростить бриф") from e
     _validate_carousel_payload(payload)
+    if target_slides is not None and len(payload["slides"]) != target_slides:
+        raise ValueError(
+            f"Claude вернул {len(payload['slides'])} слайдов, "
+            f"ожидалось {target_slides} — попробуй ещё раз"
+        )
     return payload
+
+
+async def generate_captions_for_slides(slides: list[dict]) -> dict:
+    """Generate only caption_telegram + caption_instagram for already-authored slides.
+
+    Used in ready-texts mode where Romina supplies slide texts directly and we
+    still need two captions.
+    """
+    slides_block = "\n".join(
+        f"#{s.get('order', i+1)}: {s.get('text_title', '')} — {s.get('text_body', '')}"
+        for i, s in enumerate(slides)
+    )
+    prompt = CAROUSEL_CAPTIONS_PROMPT.format(slides_block=slides_block)
+    raw = await _chat(prompt, system=CAROUSEL_SYSTEM, max_tokens=4096)
+    cleaned = _strip_json_fence(raw)
+    try:
+        payload = json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        logger.error("Claude captions JSON parse failed: %s\nRaw: %s", e, cleaned[:500])
+        raise ValueError("Claude вернул невалидный JSON для подписей") from e
+    cap_tg = payload.get("caption_telegram", "")
+    cap_ig = payload.get("caption_instagram", "")
+    if not isinstance(cap_tg, str):
+        cap_tg = ""
+    if not isinstance(cap_ig, str):
+        cap_ig = ""
+    return {
+        "caption_telegram": cap_tg[:1024],
+        "caption_instagram": cap_ig[:2200],
+    }
 
 
 async def regenerate_single_slide(
