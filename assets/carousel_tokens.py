@@ -55,6 +55,15 @@ SUBTITLE_PADDING_X = 48             # horizontal text inset
 SUBTITLE_PADDING_Y = 32             # vertical padding inside bar
 SUBTITLE_GAP = 14                   # gap between title block and body block
 
+# ── Gradient overlay (photo slides) ──
+GRADIENT_BG = (0, 0, 0)            # pure black base
+GRADIENT_MAX_OPACITY = 200         # ~78% alpha at the very bottom edge
+GRADIENT_FADE_START = 0.45         # gradient begins at this fraction of canvas height
+GRADIENT_TEXT_COLOR = (255, 255, 255)
+GRADIENT_PADDING_X = 56            # horizontal text inset
+GRADIENT_PADDING_BOTTOM = 90       # gap between text block bottom and canvas bottom
+GRADIENT_GAP = 20                  # gap between title and body blocks
+
 # ── Output ──
 PHOTO_JPEG_QUALITY = 92
 

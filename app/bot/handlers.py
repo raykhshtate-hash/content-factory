@@ -3542,7 +3542,6 @@ async def _run_carousel_pipeline(
         render_carousel,
         extract_video_thumbnail,
         deliver_carousel,
-        _build_slide_overlay,
         _build_video_subtitle,
         MAX_ATTEMPTS,
     )

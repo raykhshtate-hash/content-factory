@@ -53,6 +53,13 @@ from assets.carousel_tokens import (
     SUBTITLE_PADDING_X,
     SUBTITLE_PADDING_Y,
     SUBTITLE_GAP,
+    GRADIENT_BG,
+    GRADIENT_MAX_OPACITY,
+    GRADIENT_FADE_START,
+    GRADIENT_TEXT_COLOR,
+    GRADIENT_PADDING_X,
+    GRADIENT_PADDING_BOTTOM,
+    GRADIENT_GAP,
 )
 
 VALID_PLASHKA_POSITIONS = {"top", "center", "bottom"}
@@ -301,6 +308,70 @@ def _build_video_subtitle(title: str, body: str | None) -> Image.Image:
     return overlay
 
 
+def _build_gradient_overlay(title: str, body: str | None) -> Image.Image:
+    """RGBA overlay: vertical gradient (transparent → dark) + white text.
+
+    Full-width, no borders or rounding. Gradient starts at GRADIENT_FADE_START
+    (fraction of canvas height) and reaches GRADIENT_MAX_OPACITY at the bottom.
+    Text is centered, pinned above GRADIENT_PADDING_BOTTOM from the bottom edge.
+    """
+    overlay = Image.new("RGBA", (CANVAS_W, CANVAS_H), (0, 0, 0, 0))
+
+    # ── Gradient mask ──
+    fade_y0 = int(CANVAS_H * GRADIENT_FADE_START)
+    fade_zone = CANVAS_H - fade_y0
+
+    # 1-pixel-wide column, then stretched to full canvas width (NEAREST = no blur)
+    mask_col = Image.new("L", (1, CANVAS_H), 0)
+    pixels = [0] * fade_y0 + [
+        int(GRADIENT_MAX_OPACITY * i / (fade_zone - 1)) for i in range(fade_zone)
+    ]
+    mask_col.putdata(pixels)
+    mask = mask_col.resize((CANVAS_W, CANVAS_H), Image.NEAREST)
+
+    dark = Image.new("RGBA", (CANVAS_W, CANVAS_H), (*GRADIENT_BG, 255))
+    overlay.paste(dark, mask=mask)
+
+    # ── Text ──
+    draw = ImageDraw.Draw(overlay)
+    title_clean = _strip_emoji(title)
+    body_clean = _strip_emoji(body) if body else None
+
+    font_title = _get_font(FONT_BOLD_PATH, FONT_SIZE_TITLE)
+    font_body = _get_font(FONT_REGULAR_PATH, FONT_SIZE_BODY) if body_clean else None
+
+    wrap_width = CANVAS_W - 2 * GRADIENT_PADDING_X
+    title_lines = _wrap_text(title_clean, font_title, wrap_width)
+    body_lines = (
+        _wrap_text(body_clean, font_body, wrap_width) if body_clean and font_body else []
+    )
+
+    title_line_h = int(FONT_SIZE_TITLE * LINE_HEIGHT_TITLE)
+    body_line_h = int(FONT_SIZE_BODY * LINE_HEIGHT_BODY)
+
+    title_block_h = title_line_h * len(title_lines)
+    body_block_h = body_line_h * len(body_lines)
+    gap = GRADIENT_GAP if body_lines else 0
+    total_text_h = title_block_h + gap + body_block_h
+
+    y = CANVAS_H - GRADIENT_PADDING_BOTTOM - total_text_h
+    for line in title_lines:
+        line_w = font_title.getlength(line)
+        x = (CANVAS_W - line_w) / 2
+        draw.text((x, y), line, font=font_title, fill=GRADIENT_TEXT_COLOR)
+        y += title_line_h
+
+    if body_lines and font_body is not None:
+        y += gap
+        for line in body_lines:
+            line_w = font_body.getlength(line)
+            x = (CANVAS_W - line_w) / 2
+            draw.text((x, y), line, font=font_body, fill=GRADIENT_TEXT_COLOR)
+            y += body_line_h
+
+    return overlay
+
+
 def _luma_sample_range(position: str) -> tuple[int, int]:
     """Return (y0, y1) range to sample for dark/light plashka auto-select.
 
@@ -340,17 +411,8 @@ def _render_photo_slide_sync(
         top = (new_h - CANVAS_H) // 2
         base = scaled.crop((left, top, left + CANVAS_W, top + CANVAS_H))
 
-    # Sample region that plashka will cover to pick dark/light variant
-    sample_y0, sample_y1 = _luma_sample_range(position)
-    avg_luma = _sample_luma(base, sample_y0, sample_y1)
-    bright_bg = avg_luma > PLASHKA_LUMA_THRESHOLD
-    logger.debug(
-        "Plashka auto-select: pos=%s luma=%.1f → %s",
-        position, avg_luma, "dark" if bright_bg else "light",
-    )
-
     base_rgba = base.convert("RGBA")
-    overlay = _build_slide_overlay(title, body, bright_bg=bright_bg, position=position)
+    overlay = _build_gradient_overlay(title, body)
     composed = Image.alpha_composite(base_rgba, overlay).convert("RGB")
 
     output_path = Path(output_path)
