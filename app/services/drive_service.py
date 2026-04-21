@@ -74,6 +74,17 @@ class DriveService:
     def list_storyboard_files(self) -> list[dict]:
         return self.list_folder_files(settings.DRIVE_STORYBOARD_FOLDER_ID)
 
+    def download_file(self, file_id: str, local_path: str) -> None:
+        """Download a Drive file to local_path (blocking, suitable for asyncio.to_thread)."""
+        request = self._drive_build.files().get_media(
+            fileId=file_id, acknowledgeAbuse=True, supportsAllDrives=True
+        )
+        with open(local_path, "wb") as fh:
+            downloader = MediaIoBaseDownload(fh, request, chunksize=8 * 1024 * 1024)
+            done = False
+            while not done:
+                _, done = downloader.next_chunk()
+
     # ------------------------------------------------------------------
     # copy_to_gcs  —  the DE Hack (zero-buffer streaming)
     # ------------------------------------------------------------------

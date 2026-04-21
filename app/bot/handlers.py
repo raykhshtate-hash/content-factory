@@ -614,8 +614,32 @@ async def cmd_remix(message: types.Message):
     await message.answer("Выбери рендер для перемонтажа:", reply_markup=keyboard)
 
 
+@router.message(Command("cancel"))
+async def cmd_cancel(message: types.Message, state: FSMContext) -> None:
+    """Exit any active carousel FSM session cleanly."""
+    current = await state.get_state()
+    if current and current.startswith("CarouselStates:"):
+        data = await state.get_data()
+        item_id = data.get("item_id")
+        await state.clear()
+        if item_id:
+            await supabase_service.update_item(item_id, status="cancelled")
+        await message.answer("❌ Карусель отменена. Начни заново с /carousel.")
+    else:
+        await message.answer("Нет активной карусели. Используй /carousel чтобы начать.")
+
+
 @router.message(Command("ready"))
-async def cmd_ready(message: types.Message):
+async def cmd_ready(message: types.Message, state: FSMContext):
+    # Guard: block if user is mid-carousel flow
+    current = await state.get_state()
+    if current and current.startswith("CarouselStates:"):
+        await message.answer(
+            "⚠️ Ты сейчас создаёшь карусель. Используй кнопки в боте.\n"
+            "Чтобы выйти из карусели — /cancel."
+        )
+        return
+
     # 1. Idempotency Check
     active_item = await supabase_service.find_active_item(message.chat.id, "awaiting_footage")
     
@@ -3506,8 +3530,12 @@ async def _run_carousel_pipeline(
     file_infos: list[dict],
     payload: dict,
     progress_msg: types.Message,
+    pre_ingested: list[dict] | None = None,
 ) -> None:
-    """Ingest file_ids → render → GCS upload → deliver."""
+    """Ingest file_ids → render → GCS upload → deliver.
+
+    Pass pre_ingested=[{kind, order, local_path}] to skip Telegram download (e.g. Drive files).
+    """
     import asyncio as _asyncio
     from app.services.carousel_service import (
         ingest_file_ids,
@@ -3525,8 +3553,11 @@ async def _run_carousel_pipeline(
         with tempfile.TemporaryDirectory(prefix="carousel-") as tmp_dir:  # Pitfall 7
             tmp_path = Path(tmp_dir)
 
-            # Ingest — only take as many files as there are slides
-            ingested = await ingest_file_ids(bot, file_infos[:len(slides_meta)], tmp_path)
+            if pre_ingested is not None:
+                ingested = pre_ingested
+            else:
+                # Ingest — only take as many files as there are slides
+                ingested = await ingest_file_ids(bot, file_infos[:len(slides_meta)], tmp_path)
 
             if len(ingested) < len(slides_meta):
                 await progress_msg.edit_text(
@@ -3693,8 +3724,12 @@ def _build_footage_keyboard(
             text=f"🔁 Пересобрать тексты под {collected_count} слайд(ов)",
             callback_data=f"car:regen_count:{collected_count}",
         )])
+    if settings.DRIVE_CAROUSEL_FOLDER_ID:
+        rows.append([InlineKeyboardButton(
+            text=f"📂 Взять {slides_count} файл(ов) из Drive",
+            callback_data="car:drive_ingest",
+        )])
     if not rows:
-        # Fallback: always give user at least one clickable option when possible
         rows.append([InlineKeyboardButton(
             text="ℹ️ Жду ещё файлы…",
             callback_data="car:noop",
@@ -3749,13 +3784,10 @@ async def on_carousel_album(
     # Size check while we still have Message objects (Pitfall 5)
     ok, reject_text = await check_album_sizes(photos)
     if not ok:
-        folder_hint = ""
+        drive_hint = ""
         if settings.DRIVE_CAROUSEL_FOLDER_ID:
-            folder_hint = (
-                f"\n\nDrive-папка: https://drive.google.com/drive/folders/"
-                f"{settings.DRIVE_CAROUSEL_FOLDER_ID}"
-            )
-        await message.answer((reject_text or "") + folder_hint)
+            drive_hint = "\n\nЕсли файлы большие — нажми кнопку «📂 Взять из Drive» ниже."
+        await message.answer((reject_text or "") + drive_hint)
         return
 
     # Extract serialisable file_ids and accumulate
@@ -3825,6 +3857,89 @@ async def on_carousel_regen_count(callback: types.CallbackQuery, state: FSMConte
     await _render_carousel_preview(callback.message, item_id, new_payload)
 
 
+@router.callback_query(StateFilter(CarouselStates.awaiting_footage), F.data == "car:drive_ingest")
+async def on_carousel_drive_ingest(callback: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
+    """Download files from DRIVE_CAROUSEL_FOLDER_ID and run the carousel pipeline."""
+    await callback.answer()
+
+    if not settings.DRIVE_CAROUSEL_FOLDER_ID:
+        await callback.message.answer("Drive-папка не настроена. Обратись к администратору.")
+        return
+
+    data = await state.get_data()
+    item_id: str = data["item_id"]
+
+    row = await supabase_service.get_item(item_id)
+    payload = (row or {}).get("carousel_slides") or {}
+    slides_meta = payload.get("slides", [])
+    if not slides_meta:
+        await callback.message.answer("❌ Нет слайдов в карусели. Начни заново с /carousel.")
+        return
+
+    IMAGE_EXT = ('.jpg', '.jpeg', '.png', '.heic', '.webp', '.gif')
+    VIDEO_EXT = ('.mov', '.mp4', '.avi', '.mkv', '.webm')
+
+    progress_msg = await callback.message.answer("📂 Ищу файлы в Drive…")
+    try:
+        drive_service = DriveService()
+        all_files = await asyncio.to_thread(
+            drive_service.list_folder_files, settings.DRIVE_CAROUSEL_FOLDER_ID
+        )
+    except Exception as e:
+        await progress_msg.edit_text(f"❌ Ошибка доступа к Drive: {e}")
+        return
+
+    media_files = [
+        f for f in all_files
+        if f["name"].lower().endswith(IMAGE_EXT + VIDEO_EXT)
+    ]
+    media_files.sort(key=lambda f: f["name"])
+
+    needed = len(slides_meta)
+    if len(media_files) < needed:
+        await progress_msg.edit_text(
+            f"❌ В Drive найдено {len(media_files)} файл(ов), а слайдов {needed}. "
+            "Добавь файлы в папку и попробуй снова."
+        )
+        return
+
+    media_files = media_files[:needed]
+
+    await progress_msg.edit_text(f"⬇️ Скачиваю {len(media_files)} файл(ов) из Drive…")
+    await state.set_state(CarouselStates.assembling)
+    await supabase_service.set_stage_detail(item_id, "подготовка (Drive)")
+
+    import tempfile as _tempfile
+
+    with _tempfile.TemporaryDirectory(prefix="carousel-drive-") as drive_tmp:
+        drive_path = Path(drive_tmp)
+        pre_ingested: list[dict] = []
+        for i, df in enumerate(media_files, start=1):
+            name = df["name"].lower()
+            if any(name.endswith(ext) for ext in IMAGE_EXT):
+                kind = "photo"
+                ext = Path(df["name"]).suffix or ".jpg"
+            else:
+                kind = "video"
+                ext = Path(df["name"]).suffix or ".mp4"
+            local_path = str(drive_path / f"slide_{i:02d}{ext}")
+            try:
+                await asyncio.to_thread(drive_service.download_file, df["id"], local_path)
+            except Exception as e:
+                await progress_msg.edit_text(f"❌ Ошибка скачивания {df['name']}: {e}")
+                await state.set_state(CarouselStates.awaiting_footage)
+                return
+            await progress_msg.edit_text(f"⬇️ {i}/{len(media_files)}: {df['name']}")
+            pre_ingested.append({"kind": kind, "order": i, "local_path": local_path})
+
+        await _run_carousel_pipeline(
+            bot, callback.message, state, item_id,
+            file_infos=[], payload=payload,
+            progress_msg=progress_msg,
+            pre_ingested=pre_ingested,
+        )
+
+
 @router.callback_query(StateFilter(CarouselStates.awaiting_footage), F.data == "car:start_render")
 async def on_carousel_start_render(callback: types.CallbackQuery, state: FSMContext, bot: Bot) -> None:
     """Validate collected files count and start the render pipeline."""
@@ -3851,6 +3966,6 @@ async def on_carousel_start_render(callback: types.CallbackQuery, state: FSMCont
 
 
 # ── Fallback text handler — MUST be registered LAST ──────────────────────
-@router.message(F.text, ~Command("start", "help", "status", "reels", "post", "carousel", "stories", "ready", "addclip", "remix"))
+@router.message(F.text, ~Command("start", "help", "status", "reels", "post", "carousel", "stories", "ready", "addclip", "remix", "cancel"))
 async def handle_text(message: types.Message):
     await _process_idea(message, message.text)
