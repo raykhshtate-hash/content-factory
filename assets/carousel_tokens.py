@@ -61,7 +61,7 @@ GRADIENT_MAX_OPACITY = 200         # ~78% alpha at the very bottom edge
 GRADIENT_FADE_START = 0.45         # gradient begins at this fraction of canvas height
 GRADIENT_TEXT_COLOR = (255, 255, 255)
 GRADIENT_PADDING_X = 56            # horizontal text inset
-GRADIENT_PADDING_BOTTOM = 90       # gap between text block bottom and canvas bottom
+GRADIENT_PADDING_BOTTOM = 96       # gap between text block bottom and canvas bottom
 GRADIENT_GAP = 20                  # gap between title and body blocks
 
 # ── Output ──
