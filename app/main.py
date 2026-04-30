@@ -99,6 +99,18 @@ async def bot_webhook(request: Request, background_tasks: BackgroundTasks):
         
     return {"ok": True}
 
+@app.get("/keepalive")
+async def keepalive():
+    from app.services.supabase_service import ping
+    try:
+        await ping()
+        logger.info("[keepalive] Supabase ping OK")
+        return {"ok": True}
+    except Exception as e:
+        logger.error("[keepalive] Supabase ping failed: %s", e)
+        return {"ok": False, "error": str(e)}
+
+
 if __name__ == "__main__":
     # Local development mode entrypoint
     port = int(os.getenv("PORT", 8080))

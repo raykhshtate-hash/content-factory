@@ -123,3 +123,12 @@ async def list_user_items(chat_id: int) -> list[dict]:
         .execute()
     )
     return result.data
+
+
+async def ping() -> bool:
+    """Lightweight keep-alive query — call periodically to prevent Supabase pause."""
+    client = _get_client()
+    await asyncio.to_thread(
+        lambda: client.table(TABLE).select("id").limit(1).execute()
+    )
+    return True
