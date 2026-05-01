@@ -11,6 +11,7 @@ from app.config import settings
 from app.services import supabase_service
 from app.services.gcs_service import GCSService
 from app.services.claude_service import ClaudeService
+from app.services.creatomate_service import CreatomateService
 
 router = APIRouter(prefix="/webhooks/creatomate")
 logger = logging.getLogger(__name__)
@@ -21,10 +22,76 @@ async def process_creatomate_render(item_id: str, payload: dict):
         status = payload.get("status")
         if status != "succeeded":
             logger.error(f"Creatomate render failed for item {item_id}: {payload}")
-            await supabase_service.update_item(item_id, status="render_failed")
-            
-            # Notify user with retry button (STAB-03)
+
             item = await supabase_service.get_item(item_id)
+
+            # Stale-render guard: ignore failure webhooks for an old render_id
+            payload_render_id = payload.get("id")
+            current_render_id = item.get("creatomate_render_id") if item else None
+            if current_render_id and payload_render_id and payload_render_id != current_render_id:
+                logger.info(
+                    "Stale failure webhook ignored: payload render_id=%s != current=%s",
+                    payload_render_id, current_render_id,
+                )
+                return
+
+            # Auto-recovery: OpenAI moderation_blocked on AI sticker → strip and resubmit once.
+            # Idempotent by construction: after stripping, ai_count == 0, so a second hit falls through.
+            error_message = payload.get("error_message") or ""
+            if "moderation_blocked" in error_message:
+                render_source = item.get("render_source") if item else None
+                if isinstance(render_source, str):
+                    try:
+                        render_source = json.loads(render_source)
+                    except Exception:
+                        render_source = None
+                if isinstance(render_source, dict):
+                    elements = render_source.get("elements") or []
+                    ai_elements = [
+                        e for e in elements
+                        if e.get("type") == "image"
+                        and isinstance(e.get("source"), str)
+                        and (e.get("provider") or "").startswith("openai")
+                    ]
+                    if ai_elements:
+                        stripped_elements = [e for e in elements if e not in ai_elements]
+                        new_source = {**render_source, "elements": stripped_elements}
+                        try:
+                            creatomate = CreatomateService()
+                            webhook_url = f"{settings.BASE_URL}/webhooks/creatomate/{item_id}"
+                            new_render_id = await creatomate.submit_render(new_source, webhook_url)
+                            await supabase_service.update_item(
+                                item_id,
+                                status="rendering",
+                                creatomate_render_id=new_render_id,
+                                render_source=new_source,
+                            )
+                            logger.info(
+                                "Moderation auto-recovery: stripped %d AI sticker(s), resubmitted item=%s new_render=%s",
+                                len(ai_elements), item_id, new_render_id,
+                            )
+                            if item.get("telegram_chat_id"):
+                                bot = Bot(token=settings.BOT_TOKEN)
+                                try:
+                                    await bot.send_message(
+                                        chat_id=item["telegram_chat_id"],
+                                        text=(
+                                            f"⚠️ OpenAI заблокировал {len(ai_elements)} стикер(ов) "
+                                            f"по модерации. Пересобираю рендер без них…"
+                                        ),
+                                    )
+                                finally:
+                                    await bot.session.close()
+                            return
+                        except Exception as e:
+                            logger.exception(
+                                "Moderation auto-recovery failed for item %s: %s", item_id, e,
+                            )
+                            # Fall through to render_failed flow below
+
+            await supabase_service.update_item(item_id, status="render_failed")
+
+            # Notify user with retry button (STAB-03)
             if item and item.get("telegram_chat_id"):
                 bot = Bot(token=settings.BOT_TOKEN)
                 try:

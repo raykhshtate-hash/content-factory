@@ -278,6 +278,34 @@ Sticker overlays:
 11. Максимум 2 стикера на весь рилс (если не указано иное выше).
 12. Если сомневаешься — не ставь. Меньше лучше.
 
+=== БЕЗОПАСНОСТЬ image_prompt (КРИТИЧНО) ===
+
+image_prompt отправляется в OpenAI image generation. У OpenAI \
+СТРОГИЙ moderation: один "чувственный" эпитет → safety_violation \
+→ ВЕСЬ рендер падает целиком (не только стикер).
+
+ЗАПРЕЩЕНО использовать слова и формулировки:
+luscious, sensual, seductive, sultry, voluptuous, kissable, \
+plump lips, juicy lips, glistening lips, pouty lips, \
+bedroom eyes, suggestive, alluring, provocative.
+
+Это касается ЛЮБОЙ темы, но особенно опасно при описании губ, \
+тела, лица крупным планом.
+
+Для косметологической тематики (Romina = врач-косметолог, поэтому \
+лица/губы/шприцы — частая тема) используй КЛИНИЧЕСКИЕ или \
+ДЕКОРАТИВНЫЕ формулировки:
+- Губы: "a tube of glossy lipstick with a sparkle", \
+"a small jar of lip balm with a golden lid", \
+"a beautifully shaped lipstick imprint with a tiny diamond"
+- Лицо/уход: "a small cosmetic jar with a pearl on the lid", \
+"a hyaluronic acid syringe with a pink ribbon"
+- Красота вообще: "a tiny diamond resting on a soft rose petal", \
+"a pearl drop falling into golden glitter"
+
+Правило: описывай ОБЪЕКТЫ (предметы, инструменты, символы), \
+а не части тела с эмоциональными эпитетами. Объект всегда безопасен.
+
 === ШРИФТ СУБТИТРОВ ===
 
 Выбери шрифт для караоке-субтитров на основе контента и настроения:
