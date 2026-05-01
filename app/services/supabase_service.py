@@ -152,3 +152,12 @@ async def set_stage_detail(item_id: str, detail: str) -> None:
         .eq("id", item_id)
         .execute()
     )
+
+
+async def ping() -> bool:
+    """Lightweight keep-alive query — call periodically to prevent Supabase pause."""
+    client = _get_client()
+    await asyncio.to_thread(
+        lambda: client.table(TABLE).select("id").limit(1).execute()
+    )
+    return True
