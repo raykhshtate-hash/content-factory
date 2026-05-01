@@ -1,5 +1,18 @@
 # Content Factory — CLAUDE.md
 
+## ЯЗЫК ОТВЕТОВ
+**ВСЕГДА отвечай на русском.** Код, логи, технические идентификаторы — на английском. Весь остальной текст — русский.
+
+## ПАМЯТЬ ПРОЕКТА (Obsidian)
+В начале каждой сессии читай:
+1. `~/.claude/projects/-Users-eli-content-factory/memory/MEMORY.md` — индекс всех memories
+2. Свежий session file из `memory/sessions/` (последний по дате)
+3. Все memory-файлы из индекса, релевантные текущей задаче
+
+Vault живёт по симлинку: `~/.claude/projects/-Users-eli-content-factory/memory/` → `~/Documents/vault/wiki/claude-memory/`
+
+В конце сессии (или при `/clear`) — обновить/создать session file `memory/sessions/YYYY-MM-DD.md` и обновить `MEMORY.md`.
+
 ## What is this
 Telegram bot: video upload → AI analysis → Visual Director → Creatomate render → delivery.
 Russian-language Instagram Reels for Romina (doctor-cosmetologist, Germany/Israel).
