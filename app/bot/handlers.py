@@ -940,6 +940,33 @@ async def cmd_ready(message: types.Message, state: FSMContext):
         await analyze_and_propose(message.chat.id, item_id, video_gcs_uris, status_msg)
 
 
+_DURATION_RE = re.compile(
+    r"(?:длина|длительност[ьи]|хронометраж|продолжительност[ьи])[^\d]{0,20}"
+    r"(\d{1,3})(?:\s*[-–—до]+\s*(\d{1,3}))?\s*(?:сек|с\b|секунд)",
+    re.IGNORECASE,
+)
+
+
+def _extract_target_duration(brief: str) -> tuple[int, int] | None:
+    """Pull (min_seconds, max_seconds) from brief text, e.g. 'длина 30-45 сек'.
+
+    Returns None when brief has no explicit duration constraint — caller
+    should leave Gemini ungoverned in that case (matches legacy behavior).
+    """
+    if not brief:
+        return None
+    m = _DURATION_RE.search(brief)
+    if not m:
+        return None
+    lo = int(m.group(1))
+    hi = int(m.group(2)) if m.group(2) else lo
+    if lo > hi:
+        lo, hi = hi, lo
+    if lo < 5 or hi > 120:
+        return None
+    return lo, hi
+
+
 async def analyze_and_propose(chat_id: int, item_id: str, gcs_uris: list[str], status_msg: types.Message):
     """Background asyncio task for Gemini Video Analysis."""
     await update_progress(status_msg, 2, "Запустил Gemini 3.0 Flash для поиска лучших моментов...")
@@ -948,13 +975,26 @@ async def analyze_and_propose(chat_id: int, item_id: str, gcs_uris: list[str], s
     scenario_text = item.get("script", "") if item else ""
     voiceover_gcs_uri = item.get("voiceover_gcs_uri") if item else None
     analysis_mode = item.get("analysis_mode") if item else None
-    
+
+    target_duration = _extract_target_duration(scenario_text)
+    if target_duration:
+        logger.info("[Brief] Target duration extracted: %d-%d seconds", *target_duration)
+
     prompt = (
         f"Тебе передано {len(gcs_uris)} видео. "
         "Проанализируй их и найди самые виральные моменты для Reels/Shorts. "
         "Оцени силу хука от 1 до 10, визуальные риски и уверенность.\n\n"
     )
-    
+
+    if target_duration:
+        lo, hi = target_duration
+        prompt += (
+            f"ЦЕЛЕВАЯ ДЛИТЕЛЬНОСТЬ РИЛСА: {lo}-{hi} секунд (взято из брифа).\n"
+            f"Сумма (end_time − start_time) по ВСЕМ выбранным кандидатам ОБЯЗАНА укладываться в {lo}-{hi} секунд.\n"
+            f"Если просится больше материала — оставь только самые сильные клипы, удаляй слабые. "
+            f"Лучше 4 точных клипа суммарно на {hi}с, чем 11 средних суммарно на {hi*2}с.\n\n"
+        )
+
     if scenario_text:
         prompt += (
             "СЦЕНАРИЙ ДЛЯ ПОИСКА:\n"
