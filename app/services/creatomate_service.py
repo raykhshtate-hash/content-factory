@@ -444,7 +444,11 @@ def apply_visual_blueprint(
     for clip_info in blueprint.get("clips", []) if not skip_sfx else []:
         idx = clip_info.get("index", 0)
         transition = clip_info.get("transition")
-        if transition is not None and 0 < idx < len(clip_render_starts):
+        # Mirror the >=2.5s gate that gates the actual transition animation
+        # (see line 364 above). Without this we'd add a "whoosh" on a clip
+        # that ended up rendering as a hard cut, which sounds like a glitch.
+        clip_dur = clip_durations[idx] if idx < len(clip_durations) else 0
+        if transition is not None and 0 < idx < len(clip_render_starts) and clip_dur >= 2.5:
             sfx_uri = _pick_sfx(transition["type"])
             if sfx_uri:
                 try:
