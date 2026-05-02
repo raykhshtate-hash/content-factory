@@ -2795,14 +2795,20 @@ async def on_remix_render(callback: types.CallbackQuery):
         rendered_clips = analysis.get("rendered_clips")
 
         if rendered_clips:
-            # Restore exact clips from saved render (remix fidelity)
+            # Restore exact clips from saved render (remix fidelity).
+            # video_index is stored 1-based (matches Whisper words key); convert
+            # to 0-based for gcs_uris[] lookup. Bug pre-fix: vi was used as both,
+            # so sources came from gcs_uris[1] (video #2) for vi=1 clips while
+            # karaoke pulled words from video #1 — subtitles never matched the
+            # picture, and vi=2 clips were silently dropped.
             clips = []
             for rc in rendered_clips:
-                vi = rc.get("video_index", 0)
-                if vi >= len(gcs_uris):
+                vi = rc.get("video_index", 1)
+                arr_idx = vi - 1
+                if arr_idx < 0 or arr_idx >= len(gcs_uris):
                     logger.warning("[Remix] video_index %d out of range (%d uris), skipping", vi, len(gcs_uris))
                     continue
-                signed_url = await asyncio.to_thread(gcs_service.generate_presigned_url, gcs_uris[vi])
+                signed_url = await asyncio.to_thread(gcs_service.generate_presigned_url, gcs_uris[arr_idx])
                 clips.append(Clip(
                     source=signed_url,
                     trim_start=rc.get("trim_start", 0.0),
